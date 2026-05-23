@@ -649,7 +649,6 @@ async function initializeExtension() {
                     <i class="fa-solid fa-play moodtube-ctrl" id="moodtube-btn-playpause" style="cursor:pointer; font-size: 28px; color: #fff; transition: 0.2s; width: 28px; text-align: center;"></i>
                     <i class="fa-solid fa-forward-step moodtube-ctrl" id="moodtube-btn-next" style="cursor:pointer; color: #fff; font-size: 18px; transition: 0.2s;" title="Next"></i>
                     <i class="fa-solid fa-wand-magic-sparkles moodtube-ctrl" id="moodtube-btn-ai" style="cursor:pointer; color: ${ACCENT_COLOR}; font-size: 18px; transition: 0.3s;" title="Auto-DJ (AI)"></i>
-                    <i class="fa-solid fa-gear moodtube-ctrl" id="moodtube-btn-settings" style="cursor:pointer; color: #888; font-size: 16px; transition: 0.3s;" title="Settings"></i>
                 </div>
 
                 <div id="moodtube-volume-container" style="display: flex; align-items: center; width: 90%; flex-shrink: 0;">
@@ -688,13 +687,17 @@ async function initializeExtension() {
                     <label>Модель:</label>
                     <input type="text" id="moodtube-setting-model" placeholder="gpt-3.5-turbo" style="background: rgba(0,0,0,0.5); border: 1px solid ${ACCENT_COLOR}; color: white; padding: 5px; border-radius: 5px; width: 100%; box-sizing: border-box;">
                     
-                    <button id="moodtube-btn-save-settings" style="background: ${ACCENT_COLOR}; color: #000; border: none; padding: 8px; border-radius: 5px; cursor: pointer; font-weight: bold; margin-top: 5px;">Сохранить</button>
+                    <div style="display: flex; gap: 5px;">
+                        <button id="moodtube-btn-test-settings" style="flex: 1; background: rgba(255,255,255,0.1); color: #fff; border: 1px solid ${ACCENT_COLOR}; padding: 8px; border-radius: 5px; cursor: pointer; font-weight: bold; margin-top: 5px;">Проверить</button>
+                        <button id="moodtube-btn-save-settings" style="flex: 1; background: ${ACCENT_COLOR}; color: #000; border: none; padding: 8px; border-radius: 5px; cursor: pointer; font-weight: bold; margin-top: 5px;">Сохранить</button>
+                    </div>
                     <span style="font-size: 10px; color: #aaa; margin-top: 5px;">Позволяет не отправлять всю историю и карточки персонажей при поиске.</span>
                 </div>
             </div>
             
             <audio id="moodtube-audio-fallback" style="display:none;"></audio>
             
+            <i class="fa-solid fa-gear moodtube-ctrl" id="moodtube-btn-settings" style="position: absolute; top: 12px; right: 40px; cursor: pointer; color: #888; font-size: 16px; z-index: 5;" title="Settings"></i>
             <i class="fa-solid fa-xmark moodtube-ctrl" id="moodtube-btn-close" style="position: absolute; top: 12px; right: 15px; cursor: pointer; color: #888; font-size: 16px; z-index: 5;" title="Close"></i>
             
             <div id="moodtube-resize-handle" style="position: absolute; bottom: 0; right: 0; width: 25px; height: 25px; cursor: nwse-resize; display: flex; justify-content: center; align-items: center; z-index: 10;">
@@ -754,6 +757,47 @@ async function initializeExtension() {
             localStorage.setItem('moodtube_ai_model', $('#moodtube-setting-model').val().trim());
             callPopup("MoodTube: Настройки AI сохранены", "success");
             $('#moodtube-btn-close-settings').click();
+        });
+
+        $('#moodtube-btn-test-settings').on('click', async () => {
+            const url = $('#moodtube-setting-url').val().trim();
+            const key = $('#moodtube-setting-key').val().trim();
+            const model = $('#moodtube-setting-model').val().trim();
+            
+            if (!url || !key) {
+                callPopup("Введите URL и API Key", "warning");
+                return;
+            }
+            
+            const oldText = $('#moodtube-btn-test-settings').text();
+            $('#moodtube-btn-test-settings').text('⏳').prop('disabled', true);
+            
+            try {
+                const res = await fetch(url, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${key}`
+                    },
+                    body: JSON.stringify({
+                        model: model,
+                        messages: [{ role: 'user', content: 'respond with "ok"' }],
+                        max_tokens: 10
+                    })
+                });
+                
+                if (res.ok) {
+                    callPopup("Соединение успешно!", "success");
+                } else {
+                    const err = await res.json().catch(() => ({error: {message: "Unknown error"}}));
+                    callPopup(`Ошибка: ${res.status} - ${err.error?.message || 'Check console'}`, "error");
+                }
+            } catch (e) {
+                console.error(e);
+                callPopup(`Ошибка сети: ${e.message}`, "error");
+            } finally {
+                $('#moodtube-btn-test-settings').text(oldText).prop('disabled', false);
+            }
         });
         
         $('#moodtube-btn-close').on('click', () => {
