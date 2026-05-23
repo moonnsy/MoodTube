@@ -176,6 +176,23 @@ function playPrevInQueue() {
     playTrack(track);
 }
 
+async function handleBlockedVideo(failedTrack, index) {
+    console.log(`${LOG_PREFIX} Track blocked. Attempting to find a remix for:`, failedTrack.title);
+    const fallbackInfo = await searchYouTube(failedTrack.title + " remix");
+    
+    if (fallbackInfo && fallbackInfo.videoId) {
+        fallbackInfo.isFallback = true;
+        trackQueue[index] = fallbackInfo;
+        if (currentQueueIndex === index) {
+            playTrack(fallbackInfo);
+        } else {
+            updateQueueUI();
+        }
+    } else {
+        if (currentQueueIndex === index) playNextInQueue();
+    }
+}
+
 function playTrack(videoInfo) {
     if (!videoInfo || !videoInfo.videoId) return;
     
