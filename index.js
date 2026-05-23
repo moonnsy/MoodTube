@@ -13,10 +13,31 @@ let isPlayerFolded = true;
 let isAnalysisInProgress = false;
 let isCurrentlyPlaying = false; 
 let ytPlayer = null;
+let audioFallback = null;
+let isUsingAudioFallback = false;
 let currentVolume = 50;
 
 let trackQueue = [];
 let currentQueueIndex = -1;
+
+async function getAudioStream(videoId) {
+    for (let url of PIPED_INSTANCES) {
+        try {
+            console.log(`${LOG_PREFIX} Fetching audio stream from ${url}`);
+            const res = await fetch(`${url}/streams/${videoId}`);
+            if (!res.ok) continue;
+            const data = await res.json();
+            if (data.audioStreams && data.audioStreams.length > 0) {
+                // Find a decent bitrate (around 128k)
+                const stream = data.audioStreams.find(s => s.bitrate >= 120000) || data.audioStreams[0];
+                if (stream && stream.url) return stream.url;
+            }
+        } catch (e) {
+            console.warn(`${LOG_PREFIX} Failed to fetch stream from ${url}`);
+        }
+    }
+    return null;
+}
 
 // --- YOUTUBE IFRAME API ---
 function initYTPlayer() {
@@ -145,6 +166,7 @@ function updatePlayerVisibility() {
 }
 
 function playNextInQueue() {
+    if (audioFallback) { audioFallback.pause(); isUsingAudioFallback = false; }
     if (trackQueue.length === 0) {
         if (ytPlayer && typeof ytPlayer.stopVideo === 'function') ytPlayer.stopVideo();
         isCurrentlyPlaying = false;
@@ -169,6 +191,7 @@ function playNextInQueue() {
 }
 
 function playPrevInQueue() {
+    if (audioFallback) { audioFallback.pause(); isUsingAudioFallback = false; }
     if (trackQueue.length === 0 || currentQueueIndex <= 0) {
         if (ytPlayer && typeof ytPlayer.seekTo === 'function') ytPlayer.seekTo(0);
         return;
@@ -179,43 +202,64 @@ function playPrevInQueue() {
 }
 
 async function handleBlockedVideo(failedTrack, index) {
-    console.log(`${LOG_PREFIX} Track blocked. Attempting to find a fallback for:`, failedTrack.title);
+    console.log(`${LOG_PREFIX} Track blocked. Attempting direct audio stream fallback for:`, failedTrack.title);
     
     if (currentQueueIndex === index) {
-        $('#moodtube-widget-title').text('Ищем замену...');
+        $('#moodtube-widget-title').text('Обход блокировки...');
     }
     
-    let fallbackInfo = null;
-    const queries = ["remix", "cover", "live", "nightcore"];
+    const streamUrl = await getAudioStream(failedTrack.videoId);
     
-    // Используем оригинальный запрос (с именем артиста), если он есть, иначе чистим название видео
-    let baseSearch = failedTrack.originalQuery || failedTrack.title;
-    baseSearch = baseSearch.replace(/\b(official|music video|audio|hd|hq|lyrics|video)\b/gi, '').trim();
-    
-    for (const q of queries) {
-        let res = await searchYouTube(baseSearch + " " + q);
-        if (res && res.videoId && res.videoId !== failedTrack.videoId) {
-            fallbackInfo = res;
-            break;
-        }
-    }
-    
-    if (fallbackInfo && fallbackInfo.videoId) {
-        fallbackInfo.isFallback = true;
-        fallbackInfo.originalQuery = failedTrack.originalQuery; // Сохраняем оригинальный запрос для будущих ошибок
-        trackQueue[index] = fallbackInfo;
+    if (streamUrl) {
+        console.log(`${LOG_PREFIX} Direct stream found! Bypassing YouTube iframe.`);
+        failedTrack.isFallback = true;
         if (currentQueueIndex === index) {
-            playTrack(fallbackInfo);
-        } else {
-            updateQueueUI();
+            isUsingAudioFallback = true;
+            isCurrentlyPlaying = true;
+            $('#moodtube-btn-playpause').attr('class', 'fa-solid fa-pause moodtube-ctrl');
+            $('#moodtube-widget-title').text(failedTrack.title);
+            
+            audioFallback.src = streamUrl;
+            audioFallback.volume = currentVolume / 100;
+            audioFallback.play().catch(e => {
+                console.error("Audio playback failed", e);
+                playNextInQueue();
+            });
         }
     } else {
-        if (currentQueueIndex === index) playNextInQueue();
+        console.warn(`${LOG_PREFIX} No direct stream found. Falling back to search...`);
+        let fallbackInfo = null;
+        const queries = ["remix", "cover", "live", "nightcore"];
+        let baseSearch = failedTrack.originalQuery || failedTrack.title;
+        baseSearch = baseSearch.replace(/\b(official|music video|audio|hd|hq|lyrics|video)\b/gi, '').trim();
+        
+        for (const q of queries) {
+            let res = await searchYouTube(baseSearch + " " + q);
+            if (res && res.videoId && res.videoId !== failedTrack.videoId) {
+                fallbackInfo = res;
+                break;
+            }
+        }
+        
+        if (fallbackInfo && fallbackInfo.videoId) {
+            fallbackInfo.isFallback = true;
+            fallbackInfo.originalQuery = failedTrack.originalQuery;
+            trackQueue[index] = fallbackInfo;
+            if (currentQueueIndex === index) {
+                playTrack(fallbackInfo);
+            } else {
+                updateQueueUI();
+            }
+        } else {
+            if (currentQueueIndex === index) playNextInQueue();
+        }
     }
 }
 
 function playTrack(videoInfo) {
     if (!videoInfo || !videoInfo.videoId) return;
+    
+    if (audioFallback) { audioFallback.pause(); isUsingAudioFallback = false; }
     
     const currentVideoId = videoInfo.videoId;
     $('#moodtube-widget-title').text(videoInfo.title || 'YouTube Track');
@@ -324,7 +368,34 @@ Format strictly: {"Title": "Song Name", "Artist": "Artist Name"}
 Chat History:
 ${snippet}]`;
 
-        const aiResponse = await generateQuietPrompt({ quietPrompt: prompt, quietToLoud: false, skipWIAN: true, quietName: 'System' });
+        const customEnable = localStorage.getItem('moodtube_ai_enable') === 'true';
+        const customUrl = localStorage.getItem('moodtube_ai_url');
+        const customKey = localStorage.getItem('moodtube_ai_key');
+        const customModel = localStorage.getItem('moodtube_ai_model') || 'gpt-3.5-turbo';
+
+        let aiResponse;
+        
+        if (customEnable && customUrl && customKey) {
+            console.log(`${LOG_PREFIX} Using Custom AI Endpoint...`);
+            const res = await fetch(customUrl, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${customKey}`
+                },
+                body: JSON.stringify({
+                    model: customModel,
+                    messages: [{ role: 'system', content: prompt }],
+                    temperature: 0.7
+                })
+            });
+            if (!res.ok) throw new Error(`Custom AI API Error: ${res.status}`);
+            aiResponse = await res.json();
+        } else {
+            console.log(`${LOG_PREFIX} Using SillyTavern generateQuietPrompt...`);
+            aiResponse = await generateQuietPrompt({ quietPrompt: prompt, quietToLoud: false, skipWIAN: true, quietName: 'System' });
+        }
+
         if (!aiResponse) throw new Error("AI Timeout");
 
         console.log(`${LOG_PREFIX} Raw AI Response:`, aiResponse);
@@ -578,6 +649,7 @@ async function initializeExtension() {
                     <i class="fa-solid fa-play moodtube-ctrl" id="moodtube-btn-playpause" style="cursor:pointer; font-size: 28px; color: #fff; transition: 0.2s; width: 28px; text-align: center;"></i>
                     <i class="fa-solid fa-forward-step moodtube-ctrl" id="moodtube-btn-next" style="cursor:pointer; color: #fff; font-size: 18px; transition: 0.2s;" title="Next"></i>
                     <i class="fa-solid fa-wand-magic-sparkles moodtube-ctrl" id="moodtube-btn-ai" style="cursor:pointer; color: ${ACCENT_COLOR}; font-size: 18px; transition: 0.3s;" title="Auto-DJ (AI)"></i>
+                    <i class="fa-solid fa-gear moodtube-ctrl" id="moodtube-btn-settings" style="cursor:pointer; color: #888; font-size: 16px; transition: 0.3s;" title="Settings"></i>
                 </div>
 
                 <div id="moodtube-volume-container" style="display: flex; align-items: center; width: 90%; flex-shrink: 0;">
@@ -597,6 +669,32 @@ async function initializeExtension() {
                 </div>
             </div>
             
+            <div id="moodtube-settings-container" style="display:none; position:absolute; top:0; left:0; width:100%; height:100%; background:${BG_COLOR}; z-index:4; padding:15px; box-sizing:border-box; flex-direction:column; color: #fff; font-size: 12px; overflow-y: auto;">
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px; flex-shrink:0;">
+                    <span style="font-weight:bold; font-size:14px; color:${ACCENT_COLOR};">Настройки AI</span>
+                    <i class="fa-solid fa-chevron-down moodtube-ctrl" id="moodtube-btn-close-settings" style="cursor:pointer; font-size:14px; color:#fff;"></i>
+                </div>
+                <div style="display:flex; flex-direction:column; gap:8px;">
+                    <label style="display: flex; align-items: center; gap: 5px; cursor: pointer;">
+                        <input type="checkbox" id="moodtube-setting-enable" style="cursor: pointer;">
+                        <span>Использовать внешний ИИ API</span>
+                    </label>
+                    <label>OpenAI-совместимый URL API:</label>
+                    <input type="text" id="moodtube-setting-url" placeholder="https://api.openai.com/v1/chat/completions" style="background: rgba(0,0,0,0.5); border: 1px solid ${ACCENT_COLOR}; color: white; padding: 5px; border-radius: 5px; width: 100%; box-sizing: border-box;">
+                    
+                    <label>API Key:</label>
+                    <input type="password" id="moodtube-setting-key" placeholder="sk-..." style="background: rgba(0,0,0,0.5); border: 1px solid ${ACCENT_COLOR}; color: white; padding: 5px; border-radius: 5px; width: 100%; box-sizing: border-box;">
+                    
+                    <label>Модель:</label>
+                    <input type="text" id="moodtube-setting-model" placeholder="gpt-3.5-turbo" style="background: rgba(0,0,0,0.5); border: 1px solid ${ACCENT_COLOR}; color: white; padding: 5px; border-radius: 5px; width: 100%; box-sizing: border-box;">
+                    
+                    <button id="moodtube-btn-save-settings" style="background: ${ACCENT_COLOR}; color: #000; border: none; padding: 8px; border-radius: 5px; cursor: pointer; font-weight: bold; margin-top: 5px;">Сохранить</button>
+                    <span style="font-size: 10px; color: #aaa; margin-top: 5px;">Позволяет не отправлять всю историю и карточки персонажей при поиске.</span>
+                </div>
+            </div>
+            
+            <audio id="moodtube-audio-fallback" style="display:none;"></audio>
+            
             <i class="fa-solid fa-xmark moodtube-ctrl" id="moodtube-btn-close" style="position: absolute; top: 12px; right: 15px; cursor: pointer; color: #888; font-size: 16px; z-index: 5;" title="Close"></i>
             
             <div id="moodtube-resize-handle" style="position: absolute; bottom: 0; right: 0; width: 25px; height: 25px; cursor: nwse-resize; display: flex; justify-content: center; align-items: center; z-index: 10;">
@@ -606,9 +704,13 @@ async function initializeExtension() {
         `).appendTo('body');
 
         $('#moodtube-btn-playpause').on('click', () => {
-            if (!ytPlayer) return;
-            if (isCurrentlyPlaying) ytPlayer.pauseVideo();
-            else ytPlayer.playVideo();
+            if (isUsingAudioFallback && audioFallback) {
+                if (isCurrentlyPlaying) audioFallback.pause();
+                else audioFallback.play();
+            } else if (ytPlayer) {
+                if (isCurrentlyPlaying) ytPlayer.pauseVideo();
+                else ytPlayer.playVideo();
+            }
         });
 
         $('#moodtube-btn-next').on('click', playNextInQueue);
@@ -627,6 +729,33 @@ async function initializeExtension() {
             $('#moodtube-btn-close').show();
         });
         
+        $('#moodtube-btn-settings').on('click', () => {
+            $('#moodtube-inner-content').hide();
+            $('#moodtube-btn-close').hide();
+            $('#moodtube-queue-container').hide();
+            $('#moodtube-settings-container').css('display', 'flex');
+            
+            $('#moodtube-setting-enable').prop('checked', localStorage.getItem('moodtube_ai_enable') === 'true');
+            $('#moodtube-setting-url').val(localStorage.getItem('moodtube_ai_url') || '');
+            $('#moodtube-setting-key').val(localStorage.getItem('moodtube_ai_key') || '');
+            $('#moodtube-setting-model').val(localStorage.getItem('moodtube_ai_model') || '');
+        });
+
+        $('#moodtube-btn-close-settings').on('click', () => {
+            $('#moodtube-settings-container').hide();
+            $('#moodtube-inner-content').css('display', '');
+            $('#moodtube-btn-close').show();
+        });
+
+        $('#moodtube-btn-save-settings').on('click', () => {
+            localStorage.setItem('moodtube_ai_enable', $('#moodtube-setting-enable').is(':checked') ? 'true' : 'false');
+            localStorage.setItem('moodtube_ai_url', $('#moodtube-setting-url').val().trim());
+            localStorage.setItem('moodtube_ai_key', $('#moodtube-setting-key').val().trim());
+            localStorage.setItem('moodtube_ai_model', $('#moodtube-setting-model').val().trim());
+            callPopup("MoodTube: Настройки AI сохранены", "success");
+            $('#moodtube-btn-close-settings').click();
+        });
+        
         $('#moodtube-btn-close').on('click', () => {
             isPlayerFolded = true;
             updatePlayerVisibility();
@@ -639,7 +768,27 @@ async function initializeExtension() {
             if (ytPlayer && typeof ytPlayer.setVolume === 'function') {
                 ytPlayer.setVolume(currentVolume);
             }
+            if (audioFallback) {
+                audioFallback.volume = currentVolume / 100;
+            }
         });
+        
+        audioFallback = $('#moodtube-audio-fallback')[0];
+        if (audioFallback) {
+            audioFallback.addEventListener('play', () => {
+                isCurrentlyPlaying = true;
+                $('#moodtube-btn-playpause').attr('class', 'fa-solid fa-pause moodtube-ctrl');
+            });
+            audioFallback.addEventListener('pause', () => {
+                isCurrentlyPlaying = false;
+                $('#moodtube-btn-playpause').attr('class', 'fa-solid fa-play moodtube-ctrl');
+            });
+            audioFallback.addEventListener('ended', playNextInQueue);
+            audioFallback.addEventListener('error', () => {
+                console.error(`${LOG_PREFIX} Audio fallback error`);
+                playNextInQueue();
+            });
+        }
 
         handleDrag($('#moodtube-mini-player'), 'moodtube_player_pos');
         handleResize($('#moodtube-mini-player'), $('#moodtube-resize-handle'), 'moodtube_dim');
