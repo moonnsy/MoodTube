@@ -19,34 +19,48 @@ let trackQueue = [];
 let currentQueueIndex = -1;
 
 // --- YOUTUBE IFRAME API ---
+function initYTPlayer() {
+    if (ytPlayer || !window.YT || !window.YT.Player) return;
+    
+    ytPlayer = new YT.Player('moodtube-yt-container', {
+        height: '1', width: '1',
+        playerVars: { 'autoplay': 1, 'controls': 0, 'playsinline': 1 },
+        events: {
+            'onReady': (event) => { event.target.setVolume(currentVolume); },
+            'onStateChange': (event) => {
+                isCurrentlyPlaying = (event.data === YT.PlayerState.PLAYING);
+                $('#moodtube-btn-playpause').attr('class', isCurrentlyPlaying ? 'fa-solid fa-pause moodtube-ctrl' : 'fa-solid fa-play moodtube-ctrl');
+                if (event.data === YT.PlayerState.ENDED) {
+                    playNextInQueue();
+                }
+            },
+            'onError': (event) => {
+                console.warn(`${LOG_PREFIX} YT Player Error:`, event.data);
+                playNextInQueue();
+            }
+        }
+    });
+}
+
 function loadYouTubeAPI() {
+    if (window.YT && window.YT.Player) {
+        initYTPlayer();
+        return;
+    }
+
+    const oldReady = window.onYouTubeIframeAPIReady;
+    window.onYouTubeIframeAPIReady = () => {
+        if (oldReady) oldReady();
+        initYTPlayer();
+    };
+
     if (document.getElementById('yt-iframe-api')) return;
+    
     const tag = document.createElement('script');
     tag.id = 'yt-iframe-api';
     tag.src = "https://www.youtube.com/iframe_api";
     const firstScriptTag = document.getElementsByTagName('script')[0];
     firstScriptTag.parentNode.insertBefore(tag, firstScriptTag);
-
-    window.onYouTubeIframeAPIReady = () => {
-        ytPlayer = new YT.Player('moodtube-yt-container', {
-            height: '1', width: '1',
-            playerVars: { 'autoplay': 1, 'controls': 0, 'playsinline': 1 },
-            events: {
-                'onReady': (event) => { event.target.setVolume(currentVolume); },
-                'onStateChange': (event) => {
-                    isCurrentlyPlaying = (event.data === YT.PlayerState.PLAYING);
-                    $('#moodtube-btn-playpause').attr('class', isCurrentlyPlaying ? 'fa-solid fa-pause moodtube-ctrl' : 'fa-solid fa-play moodtube-ctrl');
-                    if (event.data === YT.PlayerState.ENDED) {
-                        playNextInQueue();
-                    }
-                },
-                'onError': (event) => {
-                    console.warn(`${LOG_PREFIX} YT Player Error:`, event.data);
-                    playNextInQueue();
-                }
-            }
-        });
-    };
 }
 
 // --- БЕСПЛАТНЫЙ ПОИСК БЕЗ БЭКЕНДА (Dynamic Piped & Invidious API) ---
@@ -164,7 +178,7 @@ function playPrevInQueue() {
 function playTrack(videoInfo) {
     if (!videoInfo || !videoInfo.videoId) return;
     
-    currentVideoId = videoInfo.videoId;
+    const currentVideoId = videoInfo.videoId;
     $('#moodtube-widget-title').text(videoInfo.title || 'YouTube Track');
     
     const thumbUrl = `https://i.ytimg.com/vi/${currentVideoId}/mqdefault.jpg`;
@@ -176,9 +190,15 @@ function playTrack(videoInfo) {
         .attr('src', thumbUrl);
     
     if (ytPlayer && typeof ytPlayer.loadVideoById === 'function') {
-        ytPlayer.loadVideoById(currentVideoId);
-        isCurrentlyPlaying = true;
-        $('#moodtube-btn-playpause').attr('class', 'fa-solid fa-pause moodtube-ctrl');
+        try {
+            ytPlayer.loadVideoById(currentVideoId);
+            isCurrentlyPlaying = true;
+            $('#moodtube-btn-playpause').attr('class', 'fa-solid fa-pause moodtube-ctrl');
+        } catch (e) {
+            console.error(`${LOG_PREFIX} Error playing track:`, e);
+        }
+    } else {
+        console.warn(`${LOG_PREFIX} ytPlayer is not ready.`);
     }
     updateQueueUI();
 }
@@ -188,11 +208,12 @@ async function searchAndPlay(query) {
     
     if (videoInfo && videoInfo.videoId) {
         trackQueue.push(videoInfo);
-        if (!isCurrentlyPlaying || trackQueue.length === 1) {
+        
+        // Force play if this is the only track, OR if the player is stopped
+        if (trackQueue.length === 1 || !isCurrentlyPlaying) {
             currentQueueIndex = trackQueue.length - 1;
             playTrack(videoInfo);
         } else {
-            callPopup(`Добавлено в очередь: ${videoInfo.title}`, "success");
             updateQueueUI();
         }
         return true;
@@ -253,22 +274,37 @@ async function triggerMoodAnalysisAndPlay() {
         
         const snippet = context.chat.slice(-15).map(m => `${m.is_user ? 'User' : 'Character'}: ${m.mes}`).join('\n');
         
-        const prompt = `[System Note: You are a professional DJ selecting a background track. 
-Read the chat history below.
-CRITICAL RULE 1: If a specific song name is explicitly mentioned in the text (e.g., "puts on X" or "X starts playing"), you MUST select that exact song.
-CRITICAL RULE 2: Otherwise, choose a track that fits the emotional vibe (e.g., Russian post-punk for Rusreal, ambient for chill, Hans Zimmer for action).
-Respond ONLY with a valid JSON object containing "Title" and "Artist". Do not write any other text.]
+        const prompt = `[SYSTEM NOTE: CRITICAL OVERRIDE. YOU ARE A STRICT METADATA API. 
+DO NOT ROLEPLAY. DO NOT SPEAK AS THE CHARACTER. NO GREETINGS. NO CONVERSATION.
+Read the chat history and output ONLY a valid JSON object.
+Rule 1: If a song is mentioned in the text, select it.
+Rule 2: Otherwise, choose a fitting mood track.
+Format strictly: {"Title": "Song Name", "Artist": "Artist Name"}
 
 Chat History:
-${snippet}`;
+${snippet}]`;
 
-        const aiResponse = await generateQuietPrompt({ quietPrompt: prompt, quietToLoud: false, skipWIAN: true });
+        const aiResponse = await generateQuietPrompt({ quietPrompt: prompt, quietToLoud: false, skipWIAN: true, quietName: 'System' });
         if (!aiResponse) throw new Error("AI Timeout");
 
         console.log(`${LOG_PREFIX} Raw AI Response:`, aiResponse);
 
-        // Улучшенный поиск JSON: проверяем, не вернул ли ИИ объект (например, из-за CoT)
-        const aiText = typeof aiResponse === 'object' ? (aiResponse.text || JSON.stringify(aiResponse)) : aiResponse;
+        // Умное извлечение текста из любых сложных объектов от API
+        let aiText = "";
+        if (typeof aiResponse === 'string') {
+            aiText = aiResponse;
+        } else if (aiResponse.text) {
+            aiText = aiResponse.text;
+        } else if (aiResponse.candidates?.[0]?.content?.parts?.[0]?.text) {
+            // Специфично для Google Vertex AI (Gemini)
+            aiText = aiResponse.candidates[0].content.parts[0].text;
+        } else if (aiResponse.choices?.[0]?.message?.content) {
+            // Специфично для OpenAI форматов
+            aiText = aiResponse.choices[0].message.content;
+        } else {
+            // Если ничего не подошло, переводим весь объект в строку и ищем в нем
+            aiText = JSON.stringify(aiResponse);
+        }
         
         let parsed = null;
         
@@ -280,8 +316,10 @@ ${snippet}`;
         
         // Попытка 2: Умный поиск первого { и соответствующего ему }
         if (!parsed) {
-            const startIdx = aiText.indexOf('{');
-            if (startIdx !== -1) {
+            // Ищем конструкцию, похожую на наш ожидаемый JSON
+            const titleMatch = aiText.match(/\{\s*"[Tt]itle"/);
+            if (titleMatch) {
+                const startIdx = titleMatch.index;
                 let depth = 0;
                 let endIdx = -1;
                 for (let i = startIdx; i < aiText.length; i++) {
@@ -300,7 +338,7 @@ ${snippet}`;
             }
         }
         
-        // Попытка 3: Регулярные выражения как крайняя мера
+        // Попытка 3: Регулярные выражения как крайняя мера (очень агрессивный поиск)
         if (!parsed) {
             const titleMatch = aiText.match(/"(?:Title|title)"\s*:\s*"([^"]+)"/i);
             const artistMatch = aiText.match(/"(?:Artist|artist)"\s*:\s*"([^"]+)"/i);
@@ -313,6 +351,7 @@ ${snippet}`;
         }
 
         if (!parsed || (!parsed.Title && !parsed.title)) {
+            console.error(`${LOG_PREFIX} Extracted string failed parsing:`, aiText);
             throw new Error("No valid JSON or song info found in response");
         }
         
@@ -431,7 +470,9 @@ function attachToUI() {
 
 // --- ИНИЦИАЛИЗАЦИЯ ИНТЕРФЕЙСА ---
 async function initializeExtension() {
-    $('<div id="moodtube-yt-container" style="display:none;"></div>').appendTo('body');
+    if ($('#moodtube-yt-container').length === 0 && $('#yt-iframe-api').length === 0) {
+        $('<div id="moodtube-yt-container" style="position:absolute; width:1px; height:1px; left:-9999px; top:-9999px; opacity:0; pointer-events:none;"></div>').appendTo('body');
+    }
     loadYouTubeAPI();
 
     $(`<style>
