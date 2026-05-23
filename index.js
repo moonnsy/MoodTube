@@ -13,8 +13,10 @@ let isPlayerFolded = true;
 let isAnalysisInProgress = false;
 let isCurrentlyPlaying = false; 
 let ytPlayer = null;
-let currentVideoId = null;
 let currentVolume = 50;
+
+let trackQueue = [];
+let currentQueueIndex = -1;
 
 // --- YOUTUBE IFRAME API ---
 function loadYouTubeAPI() {
@@ -27,13 +29,20 @@ function loadYouTubeAPI() {
 
     window.onYouTubeIframeAPIReady = () => {
         ytPlayer = new YT.Player('moodtube-yt-container', {
-            height: '0', width: '0',
-            playerVars: { 'autoplay': 1, 'controls': 0 },
+            height: '1', width: '1',
+            playerVars: { 'autoplay': 1, 'controls': 0, 'playsinline': 1 },
             events: {
                 'onReady': (event) => { event.target.setVolume(currentVolume); },
                 'onStateChange': (event) => {
                     isCurrentlyPlaying = (event.data === YT.PlayerState.PLAYING);
                     $('#moodtube-btn-playpause').attr('class', isCurrentlyPlaying ? 'fa-solid fa-pause moodtube-ctrl' : 'fa-solid fa-play moodtube-ctrl');
+                    if (event.data === YT.PlayerState.ENDED) {
+                        playNextInQueue();
+                    }
+                },
+                'onError': (event) => {
+                    console.warn(`${LOG_PREFIX} YT Player Error:`, event.data);
+                    playNextInQueue();
                 }
             }
         });
@@ -116,32 +125,116 @@ function updatePlayerVisibility() {
     else $widget.css('display', 'flex'); 
 }
 
+function playNextInQueue() {
+    if (trackQueue.length === 0) {
+        if (ytPlayer && typeof ytPlayer.stopVideo === 'function') ytPlayer.stopVideo();
+        isCurrentlyPlaying = false;
+        $('#moodtube-btn-playpause').attr('class', 'fa-solid fa-play moodtube-ctrl');
+        $('#moodtube-widget-title').text('Queue finished');
+        return;
+    }
+    
+    currentQueueIndex++;
+    if (currentQueueIndex >= trackQueue.length) {
+        currentQueueIndex = 0; // Loop queue? Let's just stop for now, or loop. Let's stop.
+        currentQueueIndex = -1;
+        trackQueue = [];
+        updateQueueUI();
+        if (ytPlayer && typeof ytPlayer.stopVideo === 'function') ytPlayer.stopVideo();
+        isCurrentlyPlaying = false;
+        $('#moodtube-btn-playpause').attr('class', 'fa-solid fa-play moodtube-ctrl');
+        $('#moodtube-widget-title').text('Queue finished');
+        return;
+    }
+
+    const track = trackQueue[currentQueueIndex];
+    playTrack(track);
+}
+
+function playPrevInQueue() {
+    if (trackQueue.length === 0 || currentQueueIndex <= 0) {
+        if (ytPlayer && typeof ytPlayer.seekTo === 'function') ytPlayer.seekTo(0);
+        return;
+    }
+    currentQueueIndex--;
+    const track = trackQueue[currentQueueIndex];
+    playTrack(track);
+}
+
+function playTrack(videoInfo) {
+    if (!videoInfo || !videoInfo.videoId) return;
+    
+    currentVideoId = videoInfo.videoId;
+    $('#moodtube-widget-title').text(videoInfo.title || 'YouTube Track');
+    
+    const thumbUrl = `https://i.ytimg.com/vi/${currentVideoId}/mqdefault.jpg`;
+    $('#moodtube-widget-cover')
+        .off('error')
+        .on('error', function() {
+            $(this).off('error').attr('src', `https://i.ytimg.com/vi/${currentVideoId}/default.jpg`);
+        })
+        .attr('src', thumbUrl);
+    
+    if (ytPlayer && typeof ytPlayer.loadVideoById === 'function') {
+        ytPlayer.loadVideoById(currentVideoId);
+        isCurrentlyPlaying = true;
+        $('#moodtube-btn-playpause').attr('class', 'fa-solid fa-pause moodtube-ctrl');
+    }
+    updateQueueUI();
+}
+
 async function searchAndPlay(query) {
     const videoInfo = await searchYouTube(query);
     
     if (videoInfo && videoInfo.videoId) {
-        currentVideoId = videoInfo.videoId;
-        $('#moodtube-widget-title').text(videoInfo.title || 'YouTube Track');
-        
-        // Надежное получение обложки напрямую с серверов YouTube, минуя прокси
-        const thumbUrl = `https://i.ytimg.com/vi/${currentVideoId}/mqdefault.jpg`;
-        $('#moodtube-widget-cover')
-            .off('error')
-            .on('error', function() {
-                $(this).off('error').attr('src', `https://i.ytimg.com/vi/${currentVideoId}/default.jpg`);
-            })
-            .attr('src', thumbUrl);
-        
-        if (ytPlayer && typeof ytPlayer.loadVideoById === 'function') {
-            ytPlayer.loadVideoById(currentVideoId);
-            isCurrentlyPlaying = true;
-            $('#moodtube-btn-playpause').attr('class', 'fa-solid fa-pause moodtube-ctrl');
+        trackQueue.push(videoInfo);
+        if (!isCurrentlyPlaying || trackQueue.length === 1) {
+            currentQueueIndex = trackQueue.length - 1;
+            playTrack(videoInfo);
+        } else {
+            callPopup(`Добавлено в очередь: ${videoInfo.title}`, "success");
+            updateQueueUI();
         }
         return true;
     } else {
         callPopup("MoodTube: Песня не найдена.", "warning");
         return false;
     }
+}
+
+function updateQueueUI() {
+    const $qList = $('#moodtube-queue-list');
+    if (!$qList.length) return;
+    
+    $qList.empty();
+    if (trackQueue.length === 0) {
+        $qList.append('<div style="font-size:12px; color:#888; text-align:center; padding:10px;">Очередь пуста</div>');
+        return;
+    }
+
+    trackQueue.forEach((track, index) => {
+        const isCurrent = index === currentQueueIndex;
+        const $item = $(`
+            <div class="moodtube-queue-item" style="
+                display:flex; align-items:center; gap:10px; padding:8px 10px; 
+                cursor:pointer; border-radius:10px; margin-bottom:5px;
+                background: ${isCurrent ? 'rgba(141, 183, 213, 0.2)' : 'rgba(0,0,0,0.3)'};
+                border: 1px solid ${isCurrent ? ACCENT_COLOR : 'transparent'};
+                transition: 0.2s;
+            ">
+                <img src="https://i.ytimg.com/vi/${track.videoId}/default.jpg" style="width:30px; height:30px; border-radius:5px; object-fit:cover;">
+                <span style="font-size:12px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; flex:1; color:${isCurrent ? '#fff' : '#aaa'};">${track.title}</span>
+                ${isCurrent ? '<i class="fa-solid fa-volume-high" style="color:' + ACCENT_COLOR + '; font-size:10px;"></i>' : ''}
+            </div>
+        `);
+        
+        $item.on('click', () => {
+            currentQueueIndex = index;
+            playTrack(trackQueue[currentQueueIndex]);
+        });
+        
+        $qList.append($item);
+    });
 }
 
 // --- ВШИТЫЙ ИИ-ПРОМТ ---
@@ -177,10 +270,52 @@ ${snippet}`;
         // Улучшенный поиск JSON: проверяем, не вернул ли ИИ объект (например, из-за CoT)
         const aiText = typeof aiResponse === 'object' ? (aiResponse.text || JSON.stringify(aiResponse)) : aiResponse;
         
-        const jsonMatch = aiText.match(/\{[\s\S]*\}/);
-        if (!jsonMatch) throw new Error("No JSON found in response");
+        let parsed = null;
         
-        const parsed = JSON.parse(jsonMatch[0]);
+        // Попытка 1: Найти блок ```json ... ```
+        const blockMatch = aiText.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+        if (blockMatch) {
+            try { parsed = JSON.parse(blockMatch[1]); } catch(e) {}
+        }
+        
+        // Попытка 2: Умный поиск первого { и соответствующего ему }
+        if (!parsed) {
+            const startIdx = aiText.indexOf('{');
+            if (startIdx !== -1) {
+                let depth = 0;
+                let endIdx = -1;
+                for (let i = startIdx; i < aiText.length; i++) {
+                    if (aiText[i] === '{') depth++;
+                    else if (aiText[i] === '}') {
+                        depth--;
+                        if (depth === 0) {
+                            endIdx = i;
+                            break;
+                        }
+                    }
+                }
+                if (endIdx !== -1) {
+                    try { parsed = JSON.parse(aiText.substring(startIdx, endIdx + 1)); } catch(e) {}
+                }
+            }
+        }
+        
+        // Попытка 3: Регулярные выражения как крайняя мера
+        if (!parsed) {
+            const titleMatch = aiText.match(/"(?:Title|title)"\s*:\s*"([^"]+)"/i);
+            const artistMatch = aiText.match(/"(?:Artist|artist)"\s*:\s*"([^"]+)"/i);
+            if (titleMatch || artistMatch) {
+                parsed = {
+                    Title: titleMatch ? titleMatch[1] : "",
+                    Artist: artistMatch ? artistMatch[1] : ""
+                };
+            }
+        }
+
+        if (!parsed || (!parsed.Title && !parsed.title)) {
+            throw new Error("No valid JSON or song info found in response");
+        }
+        
         const searchQuery = `${parsed.Title || parsed.title} ${parsed.Artist || parsed.artist}`;
         
         await searchAndPlay(searchQuery);
@@ -356,16 +491,28 @@ async function initializeExtension() {
                     <span style="color: ${ACCENT_COLOR}; font-size: 12px; font-weight: bold;">MoodTube DJ</span>
                 </div>
                 
-                <div id="moodtube-controls-container" style="display: flex; gap: 20px; align-items: center; flex-shrink: 0;">
-                    <i class="fa-solid fa-wand-magic-sparkles moodtube-ctrl" id="moodtube-btn-ai" style="cursor:pointer; color: ${ACCENT_COLOR}; font-size: 18px; transition: 0.3s;" title="Auto-DJ (AI)"></i>
+                <div id="moodtube-controls-container" style="display: flex; gap: 15px; align-items: center; flex-shrink: 0;">
+                    <i class="fa-solid fa-list-ul moodtube-ctrl" id="moodtube-btn-queue" style="cursor:pointer; color: ${ACCENT_COLOR}; font-size: 16px; transition: 0.3s;" title="Queue"></i>
+                    <i class="fa-solid fa-backward-step moodtube-ctrl" id="moodtube-btn-prev" style="cursor:pointer; color: #fff; font-size: 18px; transition: 0.2s;" title="Previous"></i>
                     <i class="fa-solid fa-play moodtube-ctrl" id="moodtube-btn-playpause" style="cursor:pointer; font-size: 28px; color: #fff; transition: 0.2s; width: 28px; text-align: center;"></i>
-                    <i class="fa-solid fa-stop moodtube-ctrl" id="moodtube-btn-stop" style="cursor:pointer; color: #fff; font-size: 20px; transition: 0.2s;"></i>
+                    <i class="fa-solid fa-forward-step moodtube-ctrl" id="moodtube-btn-next" style="cursor:pointer; color: #fff; font-size: 18px; transition: 0.2s;" title="Next"></i>
+                    <i class="fa-solid fa-wand-magic-sparkles moodtube-ctrl" id="moodtube-btn-ai" style="cursor:pointer; color: ${ACCENT_COLOR}; font-size: 18px; transition: 0.3s;" title="Auto-DJ (AI)"></i>
                 </div>
 
                 <div id="moodtube-volume-container" style="display: flex; align-items: center; width: 90%; flex-shrink: 0;">
                     <i class="fa-solid fa-volume-low" style="font-size: 12px; color: ${ACCENT_COLOR};"></i>
                     <input type="range" id="moodtube-vol-slider" min="0" max="100" value="50" class="moodtube-slider moodtube-ctrl">
                     <i class="fa-solid fa-volume-high" style="font-size: 14px; color: ${ACCENT_COLOR};"></i>
+                </div>
+            </div>
+            
+            <div id="moodtube-queue-container" style="display:none; position:absolute; top:0; left:0; width:100%; height:100%; background:${BG_COLOR}; z-index:4; padding:15px; box-sizing:border-box; flex-direction:column;">
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px; flex-shrink:0;">
+                    <span style="font-weight:bold; font-size:14px; color:${ACCENT_COLOR};">Очередь треков</span>
+                    <i class="fa-solid fa-chevron-down moodtube-ctrl" id="moodtube-btn-close-queue" style="cursor:pointer; font-size:14px; color:#fff;"></i>
+                </div>
+                <div id="moodtube-queue-list" style="flex:1; overflow-y:auto; padding-right:5px;">
+                    <div style="font-size:12px; color:#888; text-align:center; padding:10px;">Очередь пуста</div>
                 </div>
             </div>
             
@@ -383,11 +530,20 @@ async function initializeExtension() {
             else ytPlayer.playVideo();
         });
 
-        $('#moodtube-btn-stop').on('click', () => {
-            if (ytPlayer) ytPlayer.stopVideo();
-            isCurrentlyPlaying = false;
-            $('#moodtube-btn-playpause').attr('class', 'fa-solid fa-play moodtube-ctrl');
-            $('#moodtube-widget-title').text('Stopped');
+        $('#moodtube-btn-next').on('click', playNextInQueue);
+        $('#moodtube-btn-prev').on('click', playPrevInQueue);
+        
+        $('#moodtube-btn-queue').on('click', () => {
+            $('#moodtube-inner-content').hide();
+            $('#moodtube-btn-close').hide();
+            $('#moodtube-queue-container').css('display', 'flex');
+            updateQueueUI();
+        });
+
+        $('#moodtube-btn-close-queue').on('click', () => {
+            $('#moodtube-queue-container').hide();
+            $('#moodtube-inner-content').css('display', '');
+            $('#moodtube-btn-close').show();
         });
         
         $('#moodtube-btn-close').on('click', () => {
