@@ -23,20 +23,72 @@ let currentQueueIndex = -1;
 async function getAudioStream(videoId) {
     for (let url of PIPED_INSTANCES) {
         try {
-            console.log(`${LOG_PREFIX} Fetching audio stream from ${url}`);
             const res = await fetch(`${url}/streams/${videoId}`);
             if (!res.ok) continue;
             const data = await res.json();
             if (data.audioStreams && data.audioStreams.length > 0) {
-                // Find a decent bitrate (around 128k)
                 const stream = data.audioStreams.find(s => s.bitrate >= 120000) || data.audioStreams[0];
                 if (stream && stream.url) return stream.url;
             }
-        } catch (e) {
-            console.warn(`${LOG_PREFIX} Failed to fetch stream from ${url}`);
-        }
+        } catch (e) {}
     }
     return null;
+}
+
+// --- ПРЕДВАРИТЕЛЬНАЯ ПОДГОТОВКА ТРЕКОВ ---
+async function preResolveTrack(index) {
+    if (index < 0 || index >= trackQueue.length) return;
+    const track = trackQueue[index];
+    if (track.isResolved || track.isResolving || track.isFailed) return;
+
+    track.isResolving = true;
+    console.log(`${LOG_PREFIX} Pre-resolving: ${track.title}`);
+
+    // Попытка 1: Прямой стрим через Piped
+    let streamUrl = await getAudioStream(track.videoId);
+    
+    if (streamUrl) {
+        track.streamUrl = streamUrl;
+        track.isResolved = true;
+        console.log(`${LOG_PREFIX} Resolved via direct stream: ${track.title}`);
+    } else {
+        // Попытка 2: Поиск альтернативы (кавер, ремикс)
+        console.log(`${LOG_PREFIX} Direct stream failed, searching alternative for: ${track.title}`);
+        const queries = ["remix", "cover", "live", "nightcore", "lyrics"];
+        let baseSearch = track.originalQuery || track.title;
+        baseSearch = baseSearch.replace(/\b(official|music video|audio|hd|hq|lyrics|video)\b/gi, '').trim();
+
+        for (const q of queries) {
+            let res = await searchYouTube(baseSearch + " " + q);
+            if (res && res.videoId && res.videoId !== track.videoId) {
+                // Нашли альтернативный ID, пробуем стрим для него
+                let altStream = await getAudioStream(res.videoId);
+                if (altStream) {
+                    track.videoId = res.videoId;
+                    track.title = res.title + " (Alt)";
+                    track.streamUrl = altStream;
+                    track.isResolved = true;
+                    console.log(`${LOG_PREFIX} Resolved via alternative (${q}): ${track.title}`);
+                    break;
+                }
+            }
+        }
+    }
+
+    if (!track.isResolved) {
+        console.warn(`${LOG_PREFIX} Failed to resolve track: ${track.title}`);
+        track.isFailed = true;
+    }
+    
+    track.isResolving = false;
+    updateQueueUI();
+}
+
+function preResolveNextTracks() {
+    // Подготавливаем следующие 2 трека
+    for (let i = 1; i <= 2; i++) {
+        preResolveTrack(currentQueueIndex + i);
+    }
 }
 
 // --- YOUTUBE IFRAME API ---
@@ -165,28 +217,34 @@ function updatePlayerVisibility() {
     else $widget.css('display', 'flex'); 
 }
 
+function stopPlayback(message = 'Очередь завершена') {
+    if (ytPlayer && typeof ytPlayer.stopVideo === 'function') ytPlayer.stopVideo();
+    isCurrentlyPlaying = false;
+    $('#moodtube-btn-playpause').attr('class', 'fa-solid fa-play moodtube-ctrl');
+    $('#moodtube-widget-title').text(message);
+    updateQueueUI();
+}
+
 function playNextInQueue() {
     if (audioFallback) { audioFallback.pause(); isUsingAudioFallback = false; }
     if (trackQueue.length === 0) {
-        if (ytPlayer && typeof ytPlayer.stopVideo === 'function') ytPlayer.stopVideo();
-        isCurrentlyPlaying = false;
-        $('#moodtube-btn-playpause').attr('class', 'fa-solid fa-play moodtube-ctrl');
-        $('#moodtube-widget-title').text('Queue finished');
+        stopPlayback();
         return;
     }
     
     currentQueueIndex++;
     if (currentQueueIndex >= trackQueue.length) {
         currentQueueIndex = trackQueue.length;
-        updateQueueUI();
-        if (ytPlayer && typeof ytPlayer.stopVideo === 'function') ytPlayer.stopVideo();
-        isCurrentlyPlaying = false;
-        $('#moodtube-btn-playpause').attr('class', 'fa-solid fa-play moodtube-ctrl');
-        $('#moodtube-widget-title').text('Queue finished');
+        stopPlayback();
         return;
     }
 
     const track = trackQueue[currentQueueIndex];
+    if (track.isFailed) {
+        console.warn(`${LOG_PREFIX} Skipping failed track: ${track.title}`);
+        playNextInQueue();
+        return;
+    }
     playTrack(track);
 }
 
@@ -197,70 +255,65 @@ function playPrevInQueue() {
         return;
     }
     currentQueueIndex--;
-    const track = trackQueue[currentQueueIndex];
-    playTrack(track);
+    playTrack(trackQueue[currentQueueIndex]);
 }
 
 async function handleBlockedVideo(failedTrack, index) {
-    console.log(`${LOG_PREFIX} Track blocked. Attempting direct audio stream fallback for:`, failedTrack.title);
+    console.log(`${LOG_PREFIX} Track blocked. Attempting emergency bypass for:`, failedTrack.title);
     
     if (currentQueueIndex === index) {
         $('#moodtube-widget-title').text('Обход блокировки...');
     }
     
-    const streamUrl = await getAudioStream(failedTrack.videoId);
+    if (failedTrack.isFailed) {
+        if (currentQueueIndex === index) playNextInQueue();
+        return;
+    }
+
+    // Принудительно запускаем резолв, если он не успел отработать в фоне
+    await preResolveTrack(index);
     
-    if (streamUrl) {
-        console.log(`${LOG_PREFIX} Direct stream found! Bypassing YouTube iframe.`);
-        failedTrack.isFallback = true;
-        if (currentQueueIndex === index) {
-            isUsingAudioFallback = true;
-            isCurrentlyPlaying = true;
-            $('#moodtube-btn-playpause').attr('class', 'fa-solid fa-pause moodtube-ctrl');
-            $('#moodtube-widget-title').text(failedTrack.title);
-            
-            audioFallback.src = streamUrl;
-            audioFallback.volume = currentVolume / 100;
-            audioFallback.play().catch(e => {
-                console.error("Audio playback failed", e);
-                playNextInQueue();
-            });
-        }
+    if (failedTrack.isResolved && currentQueueIndex === index) {
+        playTrack(failedTrack);
     } else {
-        console.warn(`${LOG_PREFIX} No direct stream found. Falling back to search...`);
-        let fallbackInfo = null;
-        const queries = ["remix", "cover", "live", "nightcore"];
-        let baseSearch = failedTrack.originalQuery || failedTrack.title;
-        baseSearch = baseSearch.replace(/\b(official|music video|audio|hd|hq|lyrics|video)\b/gi, '').trim();
-        
-        for (const q of queries) {
-            let res = await searchYouTube(baseSearch + " " + q);
-            if (res && res.videoId && res.videoId !== failedTrack.videoId) {
-                fallbackInfo = res;
-                break;
-            }
-        }
-        
-        if (fallbackInfo && fallbackInfo.videoId) {
-            fallbackInfo.isFallback = true;
-            fallbackInfo.originalQuery = failedTrack.originalQuery;
-            trackQueue[index] = fallbackInfo;
-            if (currentQueueIndex === index) {
-                playTrack(fallbackInfo);
-            } else {
-                updateQueueUI();
-            }
-        } else {
-            if (currentQueueIndex === index) playNextInQueue();
+        if (currentQueueIndex === index) {
+            $('#moodtube-widget-title').text('Не удалось найти трек :(');
+            setTimeout(playNextInQueue, 2000);
         }
     }
 }
 
 function playTrack(videoInfo) {
-    if (!videoInfo || !videoInfo.videoId) return;
+    if (!videoInfo) return;
     
     if (audioFallback) { audioFallback.pause(); isUsingAudioFallback = false; }
     
+    // ПРЕИМУЩЕСТВО: Если трек уже подготовлен (есть streamUrl), играем его сразу
+    if (videoInfo.streamUrl) {
+        console.log(`${LOG_PREFIX} Playing via pre-resolved stream:`, videoInfo.title);
+        isUsingAudioFallback = true;
+        isCurrentlyPlaying = true;
+        $('#moodtube-btn-playpause').attr('class', 'fa-solid fa-pause moodtube-ctrl');
+        $('#moodtube-widget-title').text(videoInfo.title);
+        
+        const currentVideoId = videoInfo.videoId;
+        const thumbUrl = `https://i.ytimg.com/vi/${currentVideoId}/mqdefault.jpg`;
+        $('#moodtube-widget-cover').attr('src', thumbUrl);
+
+        audioFallback.src = videoInfo.streamUrl;
+        audioFallback.volume = currentVolume / 100;
+        audioFallback.play().catch(e => {
+            console.error("Audio Playback Error", e);
+            videoInfo.isFailed = true;
+            playNextInQueue();
+        });
+        
+        preResolveNextTracks();
+        updateQueueUI();
+        return;
+    }
+
+    // Если стрим еще не готов, пробуем обычный YouTube Iframe (он может работать)
     const currentVideoId = videoInfo.videoId;
     $('#moodtube-widget-title').text(videoInfo.title || 'YouTube Track');
     
@@ -280,9 +333,9 @@ function playTrack(videoInfo) {
         } catch (e) {
             console.error(`${LOG_PREFIX} Error playing track:`, e);
         }
-    } else {
-        console.warn(`${LOG_PREFIX} ytPlayer is not ready.`);
     }
+
+    preResolveNextTracks();
     updateQueueUI();
 }
 
@@ -290,10 +343,12 @@ async function searchAndPlay(query) {
     const videoInfo = await searchYouTube(query);
     
     if (videoInfo && videoInfo.videoId) {
-        videoInfo.originalQuery = query; // Сохраняем запрос (включающий артиста) для точного поиска замены
+        videoInfo.originalQuery = query;
         trackQueue.push(videoInfo);
         
-        // Force play if this is the only track, OR if the player is stopped
+        // Начинаем резолвить сразу после добавления в очередь
+        preResolveTrack(trackQueue.length - 1);
+        
         if (trackQueue.length === 1 || !isCurrentlyPlaying) {
             currentQueueIndex = trackQueue.length - 1;
             playTrack(videoInfo);
@@ -319,17 +374,26 @@ function updateQueueUI() {
 
     trackQueue.forEach((track, index) => {
         const isCurrent = index === currentQueueIndex;
+        let statusIcon = '';
+        if (track.isResolving) statusIcon = '<i class="fa-solid fa-spinner fa-spin" style="font-size:10px; color:#aaa;"></i>';
+        else if (track.isFailed) statusIcon = '<i class="fa-solid fa-triangle-exclamation" style="font-size:10px; color:#ff4444;" title="Не удалось найти обход"></i>';
+        else if (track.isResolved) statusIcon = '<i class="fa-solid fa-circle-check" style="font-size:10px; color:#00ff00;" title="Готов к обходу"></i>';
+
         const $item = $(`
             <div class="moodtube-queue-item" style="
                 display:flex; align-items:center; gap:10px; padding:8px 10px; 
                 cursor:pointer; border-radius:10px; margin-bottom:5px;
                 background: ${isCurrent ? 'rgba(141, 183, 213, 0.2)' : 'rgba(0,0,0,0.3)'};
                 border: 1px solid ${isCurrent ? ACCENT_COLOR : 'transparent'};
+                opacity: ${track.isFailed ? '0.6' : '1'};
                 transition: 0.2s;
             ">
                 <img src="https://i.ytimg.com/vi/${track.videoId}/default.jpg" style="width:30px; height:30px; border-radius:5px; object-fit:cover;">
-                <span style="font-size:12px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; flex:1; color:${isCurrent ? '#fff' : '#aaa'};">${track.title}</span>
-                ${isCurrent ? '<i class="fa-solid fa-volume-high" style="color:' + ACCENT_COLOR + '; font-size:10px;"></i>' : ''}
+                <span style="font-size:12px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; flex:1; color:${track.isFailed ? '#ff4444' : (isCurrent ? '#fff' : '#aaa')};">${track.title}</span>
+                <div style="display:flex; gap:5px; align-items:center;">
+                    ${statusIcon}
+                    ${isCurrent ? '<i class="fa-solid fa-volume-high" style="color:' + ACCENT_COLOR + '; font-size:10px;"></i>' : ''}
+                </div>
             </div>
         `);
         
