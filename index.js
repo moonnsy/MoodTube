@@ -36,8 +36,10 @@ function initYTPlayer() {
             },
             'onError': (event) => {
                 console.warn(`${LOG_PREFIX} YT Player Error:`, event.data);
-                if (event.data === 150 || event.data === 101) {
-                    callPopup("MoodTube: Встраивание этого трека запрещено автором. Попробуйте другой.", "warning");
+                const failedTrack = trackQueue[currentQueueIndex];
+                if (failedTrack && !failedTrack.isFallback) {
+                    handleBlockedVideo(failedTrack, currentQueueIndex);
+                    return;
                 }
                 playNextInQueue();
             }
@@ -177,11 +179,30 @@ function playPrevInQueue() {
 }
 
 async function handleBlockedVideo(failedTrack, index) {
-    console.log(`${LOG_PREFIX} Track blocked. Attempting to find a remix for:`, failedTrack.title);
-    const fallbackInfo = await searchYouTube(failedTrack.title + " remix");
+    console.log(`${LOG_PREFIX} Track blocked. Attempting to find a fallback for:`, failedTrack.title);
+    
+    if (currentQueueIndex === index) {
+        $('#moodtube-widget-title').text('Ищем замену...');
+    }
+    
+    let fallbackInfo = null;
+    const queries = ["remix", "cover", "live", "nightcore"];
+    
+    // Используем оригинальный запрос (с именем артиста), если он есть, иначе чистим название видео
+    let baseSearch = failedTrack.originalQuery || failedTrack.title;
+    baseSearch = baseSearch.replace(/\b(official|music video|audio|hd|hq|lyrics|video)\b/gi, '').trim();
+    
+    for (const q of queries) {
+        let res = await searchYouTube(baseSearch + " " + q);
+        if (res && res.videoId && res.videoId !== failedTrack.videoId) {
+            fallbackInfo = res;
+            break;
+        }
+    }
     
     if (fallbackInfo && fallbackInfo.videoId) {
         fallbackInfo.isFallback = true;
+        fallbackInfo.originalQuery = failedTrack.originalQuery; // Сохраняем оригинальный запрос для будущих ошибок
         trackQueue[index] = fallbackInfo;
         if (currentQueueIndex === index) {
             playTrack(fallbackInfo);
@@ -225,6 +246,7 @@ async function searchAndPlay(query) {
     const videoInfo = await searchYouTube(query);
     
     if (videoInfo && videoInfo.videoId) {
+        videoInfo.originalQuery = query; // Сохраняем запрос (включающий артиста) для точного поиска замены
         trackQueue.push(videoInfo);
         
         // Force play if this is the only track, OR if the player is stopped
