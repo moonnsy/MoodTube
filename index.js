@@ -28,7 +28,7 @@ function initYTPlayer() {
         events: {
             'onReady': (event) => { event.target.setVolume(currentVolume); },
             'onStateChange': (event) => {
-                isCurrentlyPlaying = (event.data === YT.PlayerState.PLAYING);
+                isCurrentlyPlaying = (event.data === YT.PlayerState.PLAYING || event.data === YT.PlayerState.BUFFERING);
                 $('#moodtube-btn-playpause').attr('class', isCurrentlyPlaying ? 'fa-solid fa-pause moodtube-ctrl' : 'fa-solid fa-play moodtube-ctrl');
                 if (event.data === YT.PlayerState.ENDED) {
                     playNextInQueue();
@@ -36,6 +36,9 @@ function initYTPlayer() {
             },
             'onError': (event) => {
                 console.warn(`${LOG_PREFIX} YT Player Error:`, event.data);
+                if (event.data === 150 || event.data === 101) {
+                    callPopup("MoodTube: Встраивание этого трека запрещено автором. Попробуйте другой.", "warning");
+                }
                 playNextInQueue();
             }
         }
@@ -150,9 +153,7 @@ function playNextInQueue() {
     
     currentQueueIndex++;
     if (currentQueueIndex >= trackQueue.length) {
-        currentQueueIndex = 0; // Loop queue? Let's just stop for now, or loop. Let's stop.
-        currentQueueIndex = -1;
-        trackQueue = [];
+        currentQueueIndex = trackQueue.length;
         updateQueueUI();
         if (ytPlayer && typeof ytPlayer.stopVideo === 'function') ytPlayer.stopVideo();
         isCurrentlyPlaying = false;
