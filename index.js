@@ -276,8 +276,11 @@ function playPrevInQueue() {
 }
 
 async function handleBlockedVideo(failedTrack, index) {
-    if (failedTrack.isExhausted) {
+    failedTrack.fallbackDepth = (failedTrack.fallbackDepth || 0) + 1;
+    if (failedTrack.isExhausted || failedTrack.fallbackDepth > 4) {
         console.warn(`${LOG_PREFIX} Bypass exhausted for:`, failedTrack.title);
+        failedTrack.isExhausted = true;
+        failedTrack.title = "❌ Заблокировано: " + failedTrack.title.replace("❌ Заблокировано: ", "");
         if (currentQueueIndex === index) playNextInQueue();
         return;
     }
@@ -332,6 +335,7 @@ async function handleBlockedVideo(failedTrack, index) {
         if (fallbackInfo && fallbackInfo.videoId) {
             console.log(`${LOG_PREFIX} Found alternative:`, fallbackInfo.title);
             fallbackInfo.isFallback = true;
+            fallbackInfo.fallbackDepth = failedTrack.fallbackDepth;
             fallbackInfo.originalQuery = failedTrack.originalQuery;
             trackQueue[index] = fallbackInfo;
             
@@ -348,7 +352,7 @@ async function handleBlockedVideo(failedTrack, index) {
     // Финальное поражение
     console.error(`${LOG_PREFIX} All bypass attempts failed for:`, failedTrack.title);
     failedTrack.isExhausted = true;
-    failedTrack.title = "❌ Заблокировано: " + failedTrack.title;
+    failedTrack.title = "❌ Заблокировано: " + failedTrack.title.replace("❌ Заблокировано: ", "");
     updateQueueUI();
     if (currentQueueIndex === index) {
         $('#moodtube-widget-title').text(failedTrack.title);
@@ -517,7 +521,10 @@ ${snippet}]`;
         console.log(`${LOG_PREFIX} --- AI Request Prompt ---\n`, prompt);
 
         const customEnable = localStorage.getItem('moodtube_ai_enable') === 'true';
-        const customUrl = localStorage.getItem('moodtube_ai_url');
+        let customUrl = localStorage.getItem('moodtube_ai_url');
+        if (customUrl && !customUrl.endsWith('/chat/completions')) {
+            customUrl = customUrl.replace(/\/+$/, '') + '/chat/completions';
+        }
         const customKey = localStorage.getItem('moodtube_ai_key');
         const customModel = localStorage.getItem('moodtube_ai_model') || 'gpt-3.5-turbo';
 
@@ -668,7 +675,10 @@ ${snippet}]`;
         console.log(`${LOG_PREFIX} --- Bulk AI Request Prompt ---\n`, prompt);
 
         const customEnable = localStorage.getItem('moodtube_ai_enable') === 'true';
-        const customUrl = localStorage.getItem('moodtube_ai_url');
+        let customUrl = localStorage.getItem('moodtube_ai_url');
+        if (customUrl && !customUrl.endsWith('/chat/completions')) {
+            customUrl = customUrl.replace(/\/+$/, '') + '/chat/completions';
+        }
         const customKey = localStorage.getItem('moodtube_ai_key');
         const customModel = localStorage.getItem('moodtube_ai_model') || 'gpt-3.5-turbo';
 
@@ -1105,8 +1115,8 @@ async function initializeExtension() {
                                     <input type="checkbox" id="moodtube-setting-enable">
                                     <span>Использовать внешний ИИ API</span>
                                 </label>
-                                <span class="mt-label">OpenAI-СЃРѕРІРјРµСЃС‚РёРјС‹Р№ URL</span>
-                                <input type="text" id="moodtube-setting-url" class="mt-input-field">
+                                <span class="mt-label">OpenAI-совместимый URL (автоматически добавим /chat/completions)</span>
+                                <input type="text" id="moodtube-setting-url" class="mt-input-field" placeholder="Например: http://127.0.0.1:5000/v1">
                                 <span class="mt-label">API Key</span>
                                 <input type="password" id="moodtube-setting-key" class="mt-input-field">
                                 <span class="mt-label">Модель</span>
@@ -1427,7 +1437,7 @@ async function initializeExtension() {
         });
 
         $('#moodtube-btn-test-settings').on('click', async () => {
-            const url = $('#moodtube-setting-url').val().trim();
+            let url = $('#moodtube-setting-url').val().trim();
             const key = $('#moodtube-setting-key').val().trim();
             const model = $('#moodtube-setting-model').val().trim();
             
@@ -1436,8 +1446,12 @@ async function initializeExtension() {
                 return;
             }
             
+            if (!url.endsWith('/chat/completions')) {
+                url = url.replace(/\/+$/, '') + '/chat/completions';
+            }
+            
             const oldText = $('#moodtube-btn-test-settings').text();
-            $('#moodtube-btn-test-settings').text('вЏі').prop('disabled', true);
+            $('#moodtube-btn-test-settings').text('⏳').prop('disabled', true);
             
             try {
                 const res = await fetch(url, {
