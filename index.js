@@ -23,6 +23,19 @@ let trackQueue = [];
 let currentQueueIndex = -1;
 let sessionPlayedTracks = [];
 
+async function fetchWithTimeout(url, options = {}, timeoutMs = 4000) {
+    const controller = new AbortController();
+    const id = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+        const response = await fetch(url, { ...options, signal: controller.signal });
+        clearTimeout(id);
+        return response;
+    } catch (e) {
+        clearTimeout(id);
+        throw e;
+    }
+}
+
 function prefetchBypassData(track) {
     if (track.prefetchPromise) return;
     
@@ -139,40 +152,44 @@ async function getInvidiousInstances() {
 }
 
 async function getPipedStream(videoId) {
-    for (let url of PIPED_INSTANCES) {
-        try {
-            const res = await fetch(`${url}/streams/${videoId}`);
-            if (!res.ok) continue;
+    try {
+        const promises = PIPED_INSTANCES.map(async url => {
+            const res = await fetchWithTimeout(`${url}/streams/${videoId}`, {}, 4000);
+            if (!res.ok) throw new Error('Bad response');
             const data = await res.json();
             if (data.audioStreams && data.audioStreams.length > 0) {
                 const stream = data.audioStreams.find(s => s.bitrate >= 120000) || data.audioStreams[0];
                 if (stream && stream.url) return stream.url;
             }
-        } catch (e) {}
+            throw new Error('No stream');
+        });
+        return await Promise.any(promises);
+    } catch (e) {
+        return null;
     }
-    return null;
 }
 
 async function getInvidiousStream(videoId) {
     try {
         const invidiousInstances = await getInvidiousInstances();
-        const topInstances = invidiousInstances.slice(0, 5);
-        for (let url of topInstances) {
-            try {
-                const res = await fetch(`${url}/api/v1/videos/${videoId}`);
-                if (!res.ok) continue;
-                const data = await res.json();
-                if (data.adaptiveFormats) {
-                    const audioStreams = data.adaptiveFormats.filter(f => f.type && f.type.startsWith('audio'));
-                    if (audioStreams.length > 0) {
-                        const stream = audioStreams.find(s => parseInt(s.bitrate || 0) >= 120000) || audioStreams[0];
-                        if (stream && stream.url) return stream.url;
-                    }
+        const topInstances = invidiousInstances.slice(0, 8);
+        const promises = topInstances.map(async url => {
+            const res = await fetchWithTimeout(`${url}/api/v1/videos/${videoId}`, {}, 4000);
+            if (!res.ok) throw new Error('Bad response');
+            const data = await res.json();
+            if (data.adaptiveFormats) {
+                const audioStreams = data.adaptiveFormats.filter(f => f.type && f.type.startsWith('audio'));
+                if (audioStreams.length > 0) {
+                    const stream = audioStreams.find(s => parseInt(s.bitrate || 0) >= 120000) || audioStreams[0];
+                    if (stream && stream.url) return stream.url;
                 }
-            } catch (e) {}
-        }
-    } catch(e) {}
-    return null;
+            }
+            throw new Error('No stream');
+        });
+        return await Promise.any(promises);
+    } catch(e) {
+        return null;
+    }
 }
 
 async function searchYouTube(query, isRetry = false) {
@@ -181,17 +198,15 @@ async function searchYouTube(query, isRetry = false) {
 
     console.log(`${LOG_PREFIX} Searching for: ${cleanQuery}${isRetry ? ' (Retry)' : ''}`);
 
-    for (let url of PIPED_INSTANCES) {
-        try {
-            const response = await fetch(`${url}/search?q=${safeQuery}&filter=all`);
-            if (!response.ok) continue;
-
+    try {
+        const pipedPromises = PIPED_INSTANCES.map(async url => {
+            const response = await fetchWithTimeout(`${url}/search?q=${safeQuery}&filter=all`, {}, 4000);
+            if (!response.ok) throw new Error('Bad response');
             const data = await response.json();
             const video = data.items?.find(item => (item.type === 'stream' || item.type === 'video') && (item.url || item.videoId));
             if (video) {
                 const vId = video.videoId || (video.url ? video.url.split('?v=')[1] : null) || (video.url ? video.url.split('/').pop() : null);
                 if (vId) {
-                    console.log(`${LOG_PREFIX} Found on Piped (${url}):`, video.title);
                     return {
                         videoId: vId,
                         title: video.title,
@@ -199,27 +214,36 @@ async function searchYouTube(query, isRetry = false) {
                     };
                 }
             }
-        } catch (e) {
-            console.warn(`${LOG_PREFIX} Piped API ${url} failed.`);
+            throw new Error('No video found');
+        });
+        
+        const videoInfo = await Promise.any(pipedPromises);
+        if (videoInfo) {
+            console.log(`${LOG_PREFIX} Found on Piped:`, videoInfo.title);
+            return videoInfo;
         }
+    } catch (e) {
+        console.warn(`${LOG_PREFIX} All Piped APIs failed for search.`);
     }
 
-    const invidiousInstances = await getInvidiousInstances();
-    const topInstances = invidiousInstances.slice(0, 15);
-
-    for (let url of topInstances) {
-        try {
-            const response = await fetch(`${url}/api/v1/search?q=${safeQuery}&type=video`);
-            if (!response.ok) continue;
-
+    try {
+        const invidiousInstances = await getInvidiousInstances();
+        const topInstances = invidiousInstances.slice(0, 10);
+        const invPromises = topInstances.map(async url => {
+            const response = await fetchWithTimeout(`${url}/api/v1/search?q=${safeQuery}&type=video`, {}, 4000);
+            if (!response.ok) throw new Error('Bad response');
             const data = await response.json();
-            if (data && data.length > 0) {
-                console.log(`${LOG_PREFIX} Found on Invidious (${url}):`, data[0].title);
-                return data[0]; 
-            }
-        } catch (e) {
-            console.warn(`${LOG_PREFIX} Invidious API ${url} failed.`);
+            if (data && data.length > 0) return data[0];
+            throw new Error('No video found');
+        });
+        
+        const videoInfo = await Promise.any(invPromises);
+        if (videoInfo) {
+            console.log(`${LOG_PREFIX} Found on Invidious:`, videoInfo.title);
+            return videoInfo;
         }
+    } catch (e) {
+        console.warn(`${LOG_PREFIX} All Invidious APIs failed for search.`);
     }
 
     if (!isRetry) {
@@ -458,7 +482,7 @@ function updateQueueUI() {
                 <img src="https://i.ytimg.com/vi/${track.videoId}/default.jpg" style="width:30px; height:30px; border-radius:5px; object-fit:cover;">
                 <span style="font-size:12px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; flex:1; color:${isCurrent ? '#fff' : '#aaa'};">${track.title}</span>
                 ${isCurrent ? '<i class="fa-solid fa-volume-high" style="color:' + ACCENT_COLOR + '; font-size:10px; margin-right:5px;"></i>' : ''}
-                <i class="fa-solid fa-ban moodtube-btn-dislike moodtube-ctrl" style="color:#ff5555; font-size:12px; cursor:pointer;" title="В бан-лист"></i>
+                <i class="fa-solid fa-heart-crack moodtube-btn-dislike moodtube-ctrl" style="color:rgba(255, 100, 100, 0.8); font-size:12px; cursor:pointer;" title="Не нравится (В бан-лист)"></i>
             </div>
         `);
         
@@ -470,13 +494,13 @@ function updateQueueUI() {
 
         $item.find('.moodtube-btn-dislike').on('click', (e) => {
             e.stopPropagation();
-            let currentBanlist = localStorage.getItem('moodtube_ai_banlist') || '';
-            const artistToBan = track.Artist || track.artist || track.title.split('-')[0].trim();
-            if (artistToBan) {
-                currentBanlist = currentBanlist ? currentBanlist + ', ' + artistToBan : artistToBan;
-                localStorage.setItem('moodtube_ai_banlist', currentBanlist);
-                $('#moodtube-setting-banlist').val(currentBanlist);
-                toastr.success(`"${artistToBan}" добавлен в бан-лист`);
+            let currentBannedSongs = localStorage.getItem('moodtube_ai_banned_songs') || '';
+            const songToBan = `${track.title} ${track.artist || track.Artist || ''}`.trim();
+            if (songToBan) {
+                currentBannedSongs = currentBannedSongs ? currentBannedSongs + ', ' + songToBan : songToBan;
+                localStorage.setItem('moodtube_ai_banned_songs', currentBannedSongs);
+                $('#moodtube-setting-banned-songs').val(currentBannedSongs);
+                toastr.success(`Трек добавлен в исключения`);
             }
             
             trackQueue.splice(index, 1);
@@ -514,13 +538,16 @@ async function triggerMoodAnalysisAndPlay() {
         let genre = localStorage.getItem('moodtube_ai_genre') || '';
         let scenario = localStorage.getItem('moodtube_ai_scenario') || '';
         let banlist = localStorage.getItem('moodtube_ai_banlist') || '';
+        let bannedSongs = localStorage.getItem('moodtube_ai_banned_songs') || '';
         let customPrompt = localStorage.getItem('moodtube_ai_custom') || '';
         
         let antiRepeatStr = sessionPlayedTracks.length > 0 
-            ? `\nDo NOT pick any of these already played songs: ${sessionPlayedTracks.join(', ')}` 
+            ? `\nDo NOT pick any of these already played songs: ${sessionPlayedTracks.slice(-20).join(', ')}` 
             : '';
             
-        let banListStr = banlist.trim() ? `\nDo NOT pick any songs from these artists: ${banlist}` : '';
+        let banListStr = '';
+        if (banlist.trim()) banListStr += `\nDo NOT pick any songs from these artists: ${banlist}`;
+        if (bannedSongs.trim()) banListStr += `\nDo NOT pick any of these specific songs: ${bannedSongs}`;
         let styleStr = '';
         if (genre.trim()) styleStr += `\nPreferred Genre/Style: ${genre}`;
         if (scenario.trim()) styleStr += `\nCurrent Scenario/Vibe: ${scenario}`;
@@ -675,12 +702,15 @@ async function triggerBulkMoodAnalysisAndPlay() {
         let genre = localStorage.getItem('moodtube_ai_genre') || '';
         let scenario = localStorage.getItem('moodtube_ai_scenario') || '';
         let banlist = localStorage.getItem('moodtube_ai_banlist') || '';
+        let bannedSongs = localStorage.getItem('moodtube_ai_banned_songs') || '';
         
         let antiRepeatStr = sessionPlayedTracks.length > 0 
             ? `\nDo NOT pick any of these already played songs: ${sessionPlayedTracks.slice(-20).join(', ')}` 
             : '';
             
-        let banListStr = banlist.trim() ? `\nDo NOT pick any songs from these artists: ${banlist}` : '';
+        let banListStr = '';
+        if (banlist.trim()) banListStr += `\nDo NOT pick any songs from these artists: ${banlist}`;
+        if (bannedSongs.trim()) banListStr += `\nDo NOT pick any of these specific songs: ${bannedSongs}`;
         let styleStr = '';
         if (genre.trim()) styleStr += `\nPreferred Genre/Style: ${genre}`;
         if (scenario.trim()) styleStr += `\nCurrent Scenario/Vibe: ${scenario}`;
@@ -1260,11 +1290,13 @@ async function initializeExtension() {
                         <div class="mt-category">
                             <div class="mt-cat-title" data-mt-cat="banlist">
                                 <i class="fa-solid fa-ban"></i>
-                                <h4>Бан-лист артистов</h4>
+                                <h4>Бан-лист (Исключения)</h4>
                                 <i class="fa-solid fa-chevron-down mt-chevron"></i>
                             </div>
                             <div class="mt-cat-content" id="mt-cat-banlist">
-                                <span class="mt-label" style="margin-top:0;">Артисты, которых ИИ НЕ будет подбирать (через запятую)</span>
+                                <span class="mt-label" style="margin-top:0;">Песни (добавляются кнопкой дизлайка)</span>
+                                <input type="text" id="moodtube-setting-banned-songs" class="mt-input-field">
+                                <span class="mt-label">Артисты, которых ИИ НЕ будет подбирать</span>
                                 <input type="text" id="moodtube-setting-banlist" class="mt-input-field">
                             </div>
                         </div>
@@ -1387,6 +1419,7 @@ async function initializeExtension() {
             $('#moodtube-setting-url').val(localStorage.getItem('moodtube_ai_url') || '');
             $('#moodtube-setting-key').val(localStorage.getItem('moodtube_ai_key') || '');
             $('#moodtube-setting-model').val(localStorage.getItem('moodtube_ai_model') || '');
+            $('#moodtube-setting-banned-songs').val(localStorage.getItem('moodtube_ai_banned_songs') || '');
             $('#moodtube-setting-banlist').val(localStorage.getItem('moodtube_ai_banlist') || '');
             $('#moodtube-setting-custom').val(localStorage.getItem('moodtube_ai_custom') || '');
 
@@ -1459,6 +1492,7 @@ async function initializeExtension() {
             localStorage.setItem('moodtube_ai_scenario', scenarioTags.join(', '));
 
             localStorage.setItem('moodtube_ai_banlist', $('#moodtube-setting-banlist').val().trim());
+            localStorage.setItem('moodtube_ai_banned_songs', $('#moodtube-setting-banned-songs').val().trim());
             localStorage.setItem('moodtube_ai_custom', $('#moodtube-setting-custom').val().trim());
 
             toastr.success("Настройки MoodTube сохранены");
