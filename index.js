@@ -177,7 +177,7 @@ async function getInvidiousStream(videoId) {
 
 async function searchYouTube(query, isRetry = false) {
     const cleanQuery = query.replace(/[\[\](){}]/g, '').trim();
-    const safeQuery = encodeURIComponent(cleanQuery + ' audio');
+    const safeQuery = encodeURIComponent(cleanQuery + ' lyrics');
 
     console.log(`${LOG_PREFIX} Searching for: ${cleanQuery}${isRetry ? ' (Retry)' : ''}`);
 
@@ -540,8 +540,8 @@ ${snippet}]`;
                 },
                 body: JSON.stringify({
                     model: customModel,
-                    messages: [{ role: 'system', content: prompt }],
-                    temperature: 0.7
+                    messages: [{ role: 'user', content: prompt }],
+                    temperature: 0.3
                 })
             });
             if (!res.ok) throw new Error(`Custom AI API Error: ${res.status}`);
@@ -663,9 +663,10 @@ async function triggerBulkMoodAnalysisAndPlay() {
         
         let rusrealRule = (scenario.includes('Русреал') || genre.includes('Русреал')) ? "\nRule: If the scenario or genre is 'Русреал', select ONLY Russian songs and artists (Russian language lyrics)." : "";
 
+        const bulkCount = parseInt($('#moodtube-bulk-count').val(), 10) || 10;
         let prompt = `[SYSTEM NOTE: CRITICAL OVERRIDE. YOU ARE A STRICT METADATA API. 
 DO NOT ROLEPLAY. DO NOT SPEAK AS THE CHARACTER. NO GREETINGS. NO CONVERSATION.
-Read the chat history and output ONLY a valid JSON array containing exactly 10 track objects.
+Read the chat history and output ONLY a valid JSON array containing exactly ${bulkCount} track objects.
 Choose fitting tracks based on the mood and scenario. ${styleStr} ${antiRepeatStr} ${banListStr} ${rusrealRule}
 Format strictly: [{"Title": "Song Name", "Artist": "Artist Name"}, ...]
 
@@ -1094,9 +1095,12 @@ async function initializeExtension() {
                     <div class="mt-header">
                         <h3><i class="fa-solid fa-sliders" style="margin-right:8px; color:${ACCENT_COLOR};"></i>MoodTube</h3>
                         <div style="display:flex; align-items:center; gap:15px;">
-                            <div id="moodtube-btn-bulk-ai" class="moodtube-ctrl" style="display:flex; align-items:center; cursor:pointer; color: ${ACCENT_COLOR}; transition: 0.3s;" title="Bulk Auto-DJ (10 tracks)">
-                                <i class="fa-solid fa-wand-magic-sparkles" style="font-size: 14px;"></i>
-                                <i class="fa-solid fa-wand-magic-sparkles" style="font-size: 14px; margin-left:-5px; margin-top:5px;"></i>
+                            <div style="display:flex; align-items:center; gap:5px;" title="Количество треков для генерации">
+                                <div id="moodtube-btn-bulk-ai" class="moodtube-ctrl" style="display:flex; align-items:center; cursor:pointer; color: ${ACCENT_COLOR}; transition: 0.3s;">
+                                    <i class="fa-solid fa-wand-magic-sparkles" style="font-size: 14px;"></i>
+                                    <i class="fa-solid fa-wand-magic-sparkles" style="font-size: 14px; margin-left:-5px; margin-top:5px;"></i>
+                                </div>
+                                <input type="number" id="moodtube-bulk-count" value="10" min="1" max="30" style="width: 36px; background: rgba(0,0,0,0.4); border: 1px solid rgba(141, 183, 213, 0.4); color: #fff; border-radius: 4px; text-align: center; font-size: 12px; outline: none;" class="moodtube-ctrl">
                             </div>
                             <span class="mt-close" id="mt-close-settings">&#10006;</span>
                         </div>
@@ -1512,7 +1516,9 @@ async function initializeExtension() {
             audioFallback.addEventListener('ended', playNextInQueue);
             audioFallback.addEventListener('error', () => {
                 console.error(`${LOG_PREFIX} Audio fallback error`);
-                playNextInQueue();
+                const track = trackQueue[currentQueueIndex];
+                if (track) handleBlockedVideo(track, currentQueueIndex);
+                else playNextInQueue();
             });
         }
 
