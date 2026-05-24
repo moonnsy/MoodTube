@@ -35,7 +35,7 @@ function prefetchBypassData(track) {
             track.streamUrl = streamUrl;
             
             if (!streamUrl) {
-                const queries = ["remix", "cover", "live", "nightcore"];
+                const queries = ["lyrics", "remix", "cover", "live"];
                 let baseSearch = track.originalQuery || track.title;
                 baseSearch = baseSearch.replace(/\b(official|music video|audio|hd|hq|lyrics|video)\b/gi, '').trim();
                 for (const q of queries) {
@@ -177,7 +177,7 @@ async function getInvidiousStream(videoId) {
 
 async function searchYouTube(query, isRetry = false) {
     const cleanQuery = query.replace(/[\[\](){}]/g, '').trim();
-    const safeQuery = encodeURIComponent(cleanQuery + ' lyrics');
+    const safeQuery = encodeURIComponent(cleanQuery);
 
     console.log(`${LOG_PREFIX} Searching for: ${cleanQuery}${isRetry ? ' (Retry)' : ''}`);
 
@@ -457,15 +457,39 @@ function updateQueueUI() {
             ">
                 <img src="https://i.ytimg.com/vi/${track.videoId}/default.jpg" style="width:30px; height:30px; border-radius:5px; object-fit:cover;">
                 <span style="font-size:12px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; flex:1; color:${isCurrent ? '#fff' : '#aaa'};">${track.title}</span>
-                ${isCurrent ? '<i class="fa-solid fa-volume-high" style="color:' + ACCENT_COLOR + '; font-size:10px;"></i>' : ''}
+                ${isCurrent ? '<i class="fa-solid fa-volume-high" style="color:' + ACCENT_COLOR + '; font-size:10px; margin-right:5px;"></i>' : ''}
+                <i class="fa-solid fa-ban moodtube-btn-dislike moodtube-ctrl" style="color:#ff5555; font-size:12px; cursor:pointer;" title="В бан-лист"></i>
             </div>
         `);
         
-        $item.on('click', () => {
+        $item.on('click', (e) => {
+            if ($(e.target).hasClass('moodtube-btn-dislike')) return;
             currentQueueIndex = index;
             playTrack(trackQueue[currentQueueIndex]);
         });
 
+        $item.find('.moodtube-btn-dislike').on('click', (e) => {
+            e.stopPropagation();
+            let currentBanlist = localStorage.getItem('moodtube_ai_banlist') || '';
+            const artistToBan = track.Artist || track.artist || track.title.split('-')[0].trim();
+            if (artistToBan) {
+                currentBanlist = currentBanlist ? currentBanlist + ', ' + artistToBan : artistToBan;
+                localStorage.setItem('moodtube_ai_banlist', currentBanlist);
+                $('#moodtube-setting-banlist').val(currentBanlist);
+                toastr.success(`"${artistToBan}" добавлен в бан-лист`);
+            }
+            
+            trackQueue.splice(index, 1);
+            if (isCurrent) {
+                currentQueueIndex--;
+                playNextInQueue();
+            } else if (index < currentQueueIndex) {
+                currentQueueIndex--;
+                updateQueueUI();
+            } else {
+                updateQueueUI();
+            }
+        });
         
         $qList.append($item);
     });
@@ -690,7 +714,7 @@ ${snippet}]`;
                 headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${customKey}` },
                 body: JSON.stringify({
                     model: customModel,
-                    messages: [{ role: 'system', content: prompt }],
+                    messages: [{ role: 'user', content: prompt }],
                     temperature: 0.8
                 })
             });
@@ -766,7 +790,8 @@ function handleDrag($el, storageKey) {
     } catch (e) {}
 
     const onStart = (e) => {
-        if ($(e.target).hasClass('moodtube-ctrl') || $(e.target).is('input') || $(e.target).closest('#moodtube-resize-handle').length) return;
+        if ($(e.target).hasClass('moodtube-ctrl') || $(e.target).is('input') || $(e.target).closest('#moodtube-resize-handle').length || $(e.target).closest('#moodtube-queue-list').length) return;
+        if (e.type === 'touchstart') e.preventDefault(); // Prevent mobile screen scrolling when dragging the widget
         startX = e.clientX || e.touches?.[0].clientX; startY = e.clientY || e.touches?.[0].clientY;
         const rect = el.getBoundingClientRect();
         initialLeft = rect.left; initialTop = rect.top;
