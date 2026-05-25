@@ -695,7 +695,7 @@ function updateQueueUI() {
                 <img src="${track.videoId ? `https://i.ytimg.com/vi/${track.videoId}/default.jpg` : 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7'}" style="width:30px; height:30px; border-radius:5px; object-fit:cover; ${!track.videoId ? 'background:rgba(255,255,255,0.1);' : ''}">
                 <span style="font-size:12px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; flex:1; color:${isCurrent ? '#fff' : '#aaa'};">${track.title}</span>
                 ${isCurrent ? '<i class="fa-solid fa-volume-high" style="color:' + ACCENT_COLOR + '; font-size:10px; margin-right:5px;"></i>' : ''}
-                <i class="fa-solid fa-heart-crack moodtube-btn-dislike moodtube-ctrl" style="color:rgba(255, 100, 100, 0.8); font-size:12px; cursor:pointer;" title="Не нравится (В бан-лист)"></i>
+                <div class="moodtube-btn-dislike moodtube-ctrl" style="width:16px; height:16px; background-color:rgba(235, 120, 120, 0.65); -webkit-mask: url(https://img.icons8.com/ios-filled/50/dislike.png) no-repeat center / contain; mask: url(https://img.icons8.com/ios-filled/50/dislike.png) no-repeat center / contain; cursor:pointer;" title="Не нравится (В бан-лист)"></div>
             </div>
         `);
         
@@ -1350,9 +1350,8 @@ async function initializeExtension() {
                         <h3><i class="fa-solid fa-sliders" style="margin-right:8px; color:${ACCENT_COLOR};"></i>MoodTube</h3>
                         <div style="display:flex; align-items:center; gap:15px;">
                             <div style="display:flex; align-items:center; gap:5px;" title="Количество треков для генерации">
-                                <div id="moodtube-btn-bulk-ai" class="moodtube-ctrl" style="display:flex; align-items:center; cursor:pointer; color: ${ACCENT_COLOR}; transition: 0.3s;">
-                                    <i class="fa-solid fa-wand-magic-sparkles" style="font-size: 14px;"></i>
-                                    <i class="fa-solid fa-wand-magic-sparkles" style="font-size: 14px; margin-left:-5px; margin-top:5px;"></i>
+                                <div id="moodtube-btn-bulk-ai" class="moodtube-ctrl" style="display:flex; align-items:center; cursor:pointer; color: ${ACCENT_COLOR}; transition: 0.3s;" title="Сгенерировать плейлист">
+                                    <div style="width: 22px; height: 22px; background-color: currentColor; -webkit-mask: url(https://img.icons8.com/ios-filled/50/cd-collection.png) no-repeat center / contain; mask: url(https://img.icons8.com/ios-filled/50/cd-collection.png) no-repeat center / contain;"></div>
                                 </div>
                                 <input type="number" id="moodtube-bulk-count" value="10" min="1" max="30" style="width: 36px; background: rgba(0,0,0,0.4); border: 1px solid rgba(141, 183, 213, 0.4); color: #fff; border-radius: 4px; text-align: center; font-size: 12px; outline: none;" class="moodtube-ctrl">
                             </div>
