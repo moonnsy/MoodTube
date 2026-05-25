@@ -36,66 +36,47 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 4000) {
     }
 }
 
-function prefetchBypassData(track) {
-    if (track.prefetchPromise) return;
-    
-    track.prefetchPromise = (async () => {
-        try {
-            console.log(`${LOG_PREFIX} Prefetching bypass for:`, track.title);
-            
-            let isBlocked = false;
-            try {
-                const oembedRes = await fetchWithTimeout(`https://noembed.com/embed?url=https://www.youtube.com/watch?v=${track.videoId}`, {}, 3000);
-                const data = await oembedRes.json();
-                if (data.error) {
-                    isBlocked = true;
-                }
-            } catch(e) {
-                try {
-                    const proxyUrl = `https://corsproxy.io/?${encodeURIComponent('https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=' + track.videoId + '&format=json')}`;
-                    const proxyRes = await fetchWithTimeout(proxyUrl, {}, 3000);
-                    if (proxyRes.status === 401 || proxyRes.status === 403 || proxyRes.status === 404) {
-                        isBlocked = true;
-                    }
-                } catch(e2) {}
-            }
+let ytTesterPlayer = null;
+let ytTesterReady = false;
+let testerResolve = null;
+let testerTimeoutId = null;
 
-            let streamUrl = await getPipedStream(track.videoId);
-            if (!streamUrl) streamUrl = await getInvidiousStream(track.videoId);
-            
-            track.streamUrl = streamUrl;
-            
-            if (!streamUrl || isBlocked) {
-                const queries = ["lyrics", "remix", "cover", "live"];
-                let baseSearch = track.originalQuery || track.title;
-                baseSearch = baseSearch.replace(/\b(official|music video|audio|hd|hq|lyrics|video)\b/gi, '').trim();
-                for (const q of queries) {
-                    let res = await searchYouTube(baseSearch + " " + q);
-                    if (res && res.videoId && res.videoId !== track.videoId) {
-                        track.fallbackInfo = res;
-                        break;
-                    }
-                }
-            }
-
-            if (isBlocked) {
-                console.log(`${LOG_PREFIX} Track proactively identified as blocked:`, track.title);
-                track.proactivelyBlocked = true;
-                
-                const index = trackQueue.indexOf(track);
-                if (index !== -1 && index !== currentQueueIndex) {
-                    if (!track.streamUrl && track.fallbackInfo) {
-                        track.fallbackInfo.isFallback = true;
-                        track.fallbackInfo.originalQuery = track.originalQuery;
-                        trackQueue[index] = track.fallbackInfo;
-                        updateQueueUI();
-                    }
-                }
-            }
-        } catch(e) {
-            console.warn(`${LOG_PREFIX} Prefetch error:`, e);
+function testVideoPlayable(videoId) {
+    return new Promise(async (resolve) => {
+        console.log(`${LOG_PREFIX} [Tester] Starting test for videoId: ${videoId}`);
+        
+        // Ждем, пока тестер будет готов (до 4 секунд)
+        for(let i=0; i<20; i++) { 
+            if(ytTesterReady && ytTesterPlayer && typeof ytTesterPlayer.loadVideoById === 'function') break; 
+            await new Promise(r=>setTimeout(r, 200)); 
         }
-    })();
+        
+        // Если тестер так и не загрузился, считаем видео рабочим (чтобы не стопорить очередь)
+        if (!ytTesterReady || !ytTesterPlayer || typeof ytTesterPlayer.loadVideoById !== 'function') {
+            console.warn(`${LOG_PREFIX} [Tester] ytTesterPlayer not ready, assuming playable.`);
+            resolve(true); 
+            return;
+        }
+        
+        testerResolve = resolve;
+        console.log(`${LOG_PREFIX} [Tester] Calling loadVideoById(${videoId})`);
+        try {
+            ytTesterPlayer.loadVideoById(videoId);
+        } catch(e) {
+            console.error(`${LOG_PREFIX} [Tester] loadVideoById error:`, e);
+            resolve(true);
+            return;
+        }
+        
+        testerTimeoutId = setTimeout(() => {
+            if (testerResolve) {
+                console.log(`${LOG_PREFIX} [Tester] Timeout reached (5s). Assuming playable.`);
+                try { ytTesterPlayer.stopVideo(); } catch(e){}
+                testerResolve(true);
+                testerResolve = null;
+            }
+        }, 5000);
+    });
 }
 
 // --- YOUTUBE IFRAME API ---
@@ -122,6 +103,39 @@ function initYTPlayer() {
                     handleBlockedVideo(failedTrack, currentQueueIndex);
                 } else {
                     playNextInQueue();
+                }
+            }
+        }
+    });
+
+    if ($('#moodtube-yt-tester').length === 0) {
+        $('<div id="moodtube-yt-tester" style="position:fixed; width:2px; height:2px; bottom:0; right:0; opacity:0.01; pointer-events:none; z-index:-1;"></div>').appendTo('body');
+    }
+    
+    ytTesterPlayer = new YT.Player('moodtube-yt-tester', {
+        height: '1', width: '1',
+        playerVars: { 'autoplay': 1, 'controls': 0, 'playsinline': 1, 'mute': 1 },
+        events: {
+            'onReady': (event) => { 
+                try { event.target.mute(); } catch(err){}
+                ytTesterReady = true; 
+            },
+            'onStateChange': (event) => {
+                // Точно ждем состояния PLAYING (1). BUFFERING (3) может сработать до ошибки копирайта!
+                if (event.data === YT.PlayerState.PLAYING) {
+                    if (testerResolve) {
+                        clearTimeout(testerTimeoutId);
+                        try { event.target.stopVideo(); } catch(err){}
+                        testerResolve(true);
+                        testerResolve = null;
+                    }
+                }
+            },
+            'onError': (event) => {
+                if (testerResolve) {
+                    clearTimeout(testerTimeoutId);
+                    testerResolve(false);
+                    testerResolve = null;
                 }
             }
         }
@@ -525,35 +539,132 @@ async function resolveQueueBackground() {
     if (isResolvingQueue) return;
     isResolvingQueue = true;
     
-    for (let i = 0; i < trackQueue.length; i++) {
-        let track = trackQueue[i];
-        if (!track.videoId && track.originalQuery && !track.searchFailed) {
-            const videoInfo = await searchYouTube(track.originalQuery);
-            if (videoInfo && videoInfo.videoId) {
-                track.videoId = videoInfo.videoId;
-                track.title = videoInfo.title;
-                track.videoThumbnails = videoInfo.videoThumbnails;
-                delete track.isSearching;
-                
-                prefetchBypassData(track);
-                updateQueueUI();
-                
-                if (currentQueueIndex === i && (!isCurrentlyPlaying || (ytPlayer && ytPlayer.getPlayerState() === YT.PlayerState.ENDED))) {
-                    playTrack(trackQueue[i]);
+    try {
+        for (let i = 0; i < trackQueue.length; i++) {
+            let track = trackQueue[i];
+            if (!track.videoId && track.originalQuery && !track.searchFailed) {
+                const videoInfo = await searchYouTube(track.originalQuery);
+                if (videoInfo && videoInfo.videoId) {
+                    track.videoId = videoInfo.videoId;
+                    track.title = videoInfo.title;
+                    track.videoThumbnails = videoInfo.videoThumbnails;
+                    delete track.isSearching;
+                    
+                    updateQueueUI();
+                    
+                    // Если это первый трек, пускаем сразу в главный плеер
+                    if (currentQueueIndex === i && (!isCurrentlyPlaying || (ytPlayer && ytPlayer.getPlayerState() === YT.PlayerState.ENDED))) {
+                        track.isValidated = true; // Считаем валидным, если сразу пускаем, ошибки поймает главный плеер
+                        playTrack(trackQueue[i]); 
+                    }
+                } else {
+                    track.searchFailed = true;
+                    delete track.isSearching;
+                    track.title = "❌ Не найдено: " + track.originalQuery;
+                    updateQueueUI();
+                    if (currentQueueIndex === i) {
+                        playNextInQueue();
+                    }
                 }
-            } else {
-                track.searchFailed = true;
-                delete track.isSearching;
-                track.title = "❌ Не найдено: " + track.originalQuery;
-                updateQueueUI();
+                // Небольшая пауза между поисками
+                await new Promise(r => setTimeout(r, 400));
+            }
+        }
+    } catch (e) {
+        console.error(`${LOG_PREFIX} Background search error:`, e);
+    } finally {
+        isResolvingQueue = false;
+        // Запускаем фоновый тестер
+        startBackgroundTester();
+    }
+}
+
+let isTestingQueue = false;
+async function startBackgroundTester() {
+    if (isTestingQueue) return;
+    isTestingQueue = true;
+
+    try {
+        for (let i = 0; i < trackQueue.length; i++) {
+            let track = trackQueue[i];
+            // Проверяем только те, что уже найдены (есть videoId), но еще не валидировались и не зафейлились
+            if (track.videoId && !track.isValidated && !track.searchFailed && !track.proactivelyBlocked && !track.isFallback) {
+                
+                // Пропускаем тест, если это трек, который УЖЕ играет
                 if (currentQueueIndex === i) {
-                    playNextInQueue();
+                    track.isValidated = true;
+                    continue;
+                }
+
+                track.title = "⏳ " + track.title;
+                updateQueueUI();
+                
+                const isPlayable = await testVideoPlayable(track.videoId);
+                
+                if (isPlayable) {
+                    track.title = track.title.replace("⏳ ", "");
+                    track.isValidated = true;
+                    updateQueueUI();
+                } else {
+                    track.title = track.title.replace("⏳ ", "⚠️ Обход: ");
+                    updateQueueUI();
+                    
+                    let streamUrl = await getPipedStream(track.videoId);
+                    if (!streamUrl) streamUrl = await getInvidiousStream(track.videoId);
+                    
+                    if (streamUrl) {
+                        track.streamUrl = streamUrl;
+                        track.title = track.title.replace("⚠️ Обход: ", "");
+                        track.proactivelyBlocked = true;
+                        track.isValidated = true;
+                        updateQueueUI();
+                    } else {
+                        // Ищем Cover
+                        const queries = ["lyrics", "remix", "cover", "live"];
+                        let baseSearch = track.originalQuery || track.title;
+                        baseSearch = baseSearch.replace(/\b(official|music video|audio|hd|hq|lyrics|video|⚠️ Обход:|⏳)\b/gi, '').trim();
+                        let foundFallback = false;
+                        
+                        for (const q of queries) {
+                            let res = await searchYouTube(baseSearch + " " + q);
+                            if (res && res.videoId && res.videoId !== track.videoId) {
+                                const isCoverPlayable = await testVideoPlayable(res.videoId);
+                                if (isCoverPlayable) {
+                                    track.videoId = res.videoId;
+                                    track.title = res.title;
+                                    track.videoThumbnails = res.videoThumbnails;
+                                    track.isValidated = true;
+                                    track.isFallback = true;
+                                    foundFallback = true;
+                                    break;
+                                }
+                            }
+                        }
+                        
+                        if (foundFallback) {
+                            updateQueueUI();
+                        } else {
+                            track.searchFailed = true;
+                            track.isValidated = true;
+                            track.title = "❌ Заблокировано: " + track.originalQuery;
+                            updateQueueUI();
+                        }
+                    }
                 }
             }
-            await new Promise(r => setTimeout(r, 800));
+        }
+    } catch (e) {
+        console.error(`${LOG_PREFIX} Background tester error:`, e);
+    } finally {
+        isTestingQueue = false;
+        // Если за время тестов добавились новые сырые треки, перезапустим резолвер
+        if (trackQueue.some(t => !t.videoId && t.originalQuery && !t.searchFailed)) {
+            setTimeout(resolveQueueBackground, 500);
+        } else if (trackQueue.some(t => t.videoId && !t.isValidated && !t.searchFailed)) {
+            // Или если добавились новые треки для тестов
+            setTimeout(startBackgroundTester, 500);
         }
     }
-    isResolvingQueue = false;
 }
 
 async function searchAndPlay(query) {
