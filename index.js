@@ -1,7 +1,7 @@
 ﻿
 
 import { getContext } from '../../../extensions.js';
-import { generateQuietPrompt } from '../../../../script.js';
+import { generateRaw } from '../../../../script.js';
 
 const extensionName = "MoodTube";
 const LOG_PREFIX = "[MoodTube]";
@@ -42,12 +42,30 @@ function prefetchBypassData(track) {
     track.prefetchPromise = (async () => {
         try {
             console.log(`${LOG_PREFIX} Prefetching bypass for:`, track.title);
+            
+            let isBlocked = false;
+            try {
+                const oembedRes = await fetchWithTimeout(`https://noembed.com/embed?url=https://www.youtube.com/watch?v=${track.videoId}`, {}, 3000);
+                const data = await oembedRes.json();
+                if (data.error) {
+                    isBlocked = true;
+                }
+            } catch(e) {
+                try {
+                    const proxyUrl = `https://corsproxy.io/?${encodeURIComponent('https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=' + track.videoId + '&format=json')}`;
+                    const proxyRes = await fetchWithTimeout(proxyUrl, {}, 3000);
+                    if (proxyRes.status === 401 || proxyRes.status === 403 || proxyRes.status === 404) {
+                        isBlocked = true;
+                    }
+                } catch(e2) {}
+            }
+
             let streamUrl = await getPipedStream(track.videoId);
             if (!streamUrl) streamUrl = await getInvidiousStream(track.videoId);
             
             track.streamUrl = streamUrl;
             
-            if (!streamUrl) {
+            if (!streamUrl || isBlocked) {
                 const queries = ["lyrics", "remix", "cover", "live"];
                 let baseSearch = track.originalQuery || track.title;
                 baseSearch = baseSearch.replace(/\b(official|music video|audio|hd|hq|lyrics|video)\b/gi, '').trim();
@@ -56,6 +74,21 @@ function prefetchBypassData(track) {
                     if (res && res.videoId && res.videoId !== track.videoId) {
                         track.fallbackInfo = res;
                         break;
+                    }
+                }
+            }
+
+            if (isBlocked) {
+                console.log(`${LOG_PREFIX} Track proactively identified as blocked:`, track.title);
+                track.proactivelyBlocked = true;
+                
+                const index = trackQueue.indexOf(track);
+                if (index !== -1 && index !== currentQueueIndex) {
+                    if (!track.streamUrl && track.fallbackInfo) {
+                        track.fallbackInfo.isFallback = true;
+                        track.fallbackInfo.originalQuery = track.originalQuery;
+                        trackQueue[index] = track.fallbackInfo;
+                        updateQueueUI();
                     }
                 }
             }
@@ -285,7 +318,16 @@ function playNextInQueue() {
     }
 
     const track = trackQueue[currentQueueIndex];
-    playTrack(track);
+    if (!track.videoId && track.isSearching) {
+        isCurrentlyPlaying = false;
+        $('#moodtube-btn-playpause').attr('class', 'fa-solid fa-play moodtube-ctrl');
+        $('#moodtube-widget-title').text(track.title);
+        updateQueueUI();
+    } else if (track.searchFailed) {
+        playNextInQueue();
+    } else {
+        playTrack(track);
+    }
 }
 
 function playPrevInQueue() {
@@ -296,7 +338,16 @@ function playPrevInQueue() {
     }
     currentQueueIndex--;
     const track = trackQueue[currentQueueIndex];
-    playTrack(track);
+    if (!track.videoId && track.isSearching) {
+        isCurrentlyPlaying = false;
+        $('#moodtube-btn-playpause').attr('class', 'fa-solid fa-play moodtube-ctrl');
+        $('#moodtube-widget-title').text(track.title);
+        updateQueueUI();
+    } else if (track.searchFailed) {
+        playPrevInQueue();
+    } else {
+        playTrack(track);
+    }
 }
 
 async function handleBlockedVideo(failedTrack, index) {
@@ -410,6 +461,20 @@ function playTrack(videoInfo) {
     }
     
     if (audioFallback) { audioFallback.pause(); isUsingAudioFallback = false; }
+
+    if (videoInfo.proactivelyBlocked) {
+        if (videoInfo.streamUrl) {
+            playAudioStream(videoInfo, videoInfo.streamUrl, trackQueue.indexOf(videoInfo));
+            return;
+        } else if (videoInfo.fallbackInfo) {
+            videoInfo.fallbackInfo.isFallback = true;
+            videoInfo.fallbackInfo.originalQuery = videoInfo.originalQuery;
+            const idx = trackQueue.indexOf(videoInfo);
+            if (idx !== -1) trackQueue[idx] = videoInfo.fallbackInfo;
+            playTrack(videoInfo.fallbackInfo);
+            return;
+        }
+    }
     
     const currentVideoId = videoInfo.videoId;
     $('#moodtube-widget-title').text(videoInfo.title || 'YouTube Track');
@@ -436,27 +501,64 @@ function playTrack(videoInfo) {
     updateQueueUI();
 }
 
-async function searchAndPlay(query) {
-    const videoInfo = await searchYouTube(query);
+function enqueueQuery(query) {
+    const trackObj = {
+        title: "Ищем: " + query,
+        originalQuery: query,
+        videoId: null,
+        isSearching: true
+    };
+    trackQueue.push(trackObj);
+    updateQueueUI();
     
-    if (videoInfo && videoInfo.videoId) {
-        videoInfo.originalQuery = query; // Сохраняем запрос (включающий артиста) для точного поиска замены
-        trackQueue.push(videoInfo);
-        
-        prefetchBypassData(videoInfo);
-        
-        // Force play if this is the only track, OR if the player is stopped
-        if (trackQueue.length === 1 || !isCurrentlyPlaying) {
+    if (trackQueue.length === 1 || (!isCurrentlyPlaying && (ytPlayer ? ytPlayer.getPlayerState() !== YT.PlayerState.PLAYING && ytPlayer.getPlayerState() !== YT.PlayerState.BUFFERING : true))) {
+        if (currentQueueIndex === -1 || currentQueueIndex >= trackQueue.length - 1) {
             currentQueueIndex = trackQueue.length - 1;
-            playTrack(videoInfo);
-        } else {
-            updateQueueUI();
+            $('#moodtube-widget-title').text(trackObj.title);
         }
-        return true;
-    } else {
-        toastr.warning("MoodTube: Песня не найдена.");
-        return false;
     }
+    resolveQueueBackground();
+}
+
+let isResolvingQueue = false;
+async function resolveQueueBackground() {
+    if (isResolvingQueue) return;
+    isResolvingQueue = true;
+    
+    for (let i = 0; i < trackQueue.length; i++) {
+        let track = trackQueue[i];
+        if (!track.videoId && track.originalQuery && !track.searchFailed) {
+            const videoInfo = await searchYouTube(track.originalQuery);
+            if (videoInfo && videoInfo.videoId) {
+                track.videoId = videoInfo.videoId;
+                track.title = videoInfo.title;
+                track.videoThumbnails = videoInfo.videoThumbnails;
+                delete track.isSearching;
+                
+                prefetchBypassData(track);
+                updateQueueUI();
+                
+                if (currentQueueIndex === i && (!isCurrentlyPlaying || (ytPlayer && ytPlayer.getPlayerState() === YT.PlayerState.ENDED))) {
+                    playTrack(trackQueue[i]);
+                }
+            } else {
+                track.searchFailed = true;
+                delete track.isSearching;
+                track.title = "❌ Не найдено: " + track.originalQuery;
+                updateQueueUI();
+                if (currentQueueIndex === i) {
+                    playNextInQueue();
+                }
+            }
+            await new Promise(r => setTimeout(r, 800));
+        }
+    }
+    isResolvingQueue = false;
+}
+
+async function searchAndPlay(query) {
+    enqueueQuery(query);
+    return true;
 }
 
 function updateQueueUI() {
@@ -479,7 +581,7 @@ function updateQueueUI() {
                 border: 1px solid ${isCurrent ? ACCENT_COLOR : 'transparent'};
                 transition: 0.2s;
             ">
-                <img src="https://i.ytimg.com/vi/${track.videoId}/default.jpg" style="width:30px; height:30px; border-radius:5px; object-fit:cover;">
+                <img src="${track.videoId ? `https://i.ytimg.com/vi/${track.videoId}/default.jpg` : 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7'}" style="width:30px; height:30px; border-radius:5px; object-fit:cover; ${!track.videoId ? 'background:rgba(255,255,255,0.1);' : ''}">
                 <span style="font-size:12px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; flex:1; color:${isCurrent ? '#fff' : '#aaa'};">${track.title}</span>
                 ${isCurrent ? '<i class="fa-solid fa-volume-high" style="color:' + ACCENT_COLOR + '; font-size:10px; margin-right:5px;"></i>' : ''}
                 <i class="fa-solid fa-heart-crack moodtube-btn-dislike moodtube-ctrl" style="color:rgba(255, 100, 100, 0.8); font-size:12px; cursor:pointer;" title="Не нравится (В бан-лист)"></i>
@@ -598,17 +700,10 @@ ${snippet}]`;
             if (!res.ok) throw new Error(`Custom AI API Error: ${res.status}`);
             aiResponse = await res.json();
         } else {
-            console.log(`${LOG_PREFIX} Using SillyTavern generateQuietPrompt (Pure Mode)...`);
-            // To ensure NO presets/character notes are sent, we use a more direct approach 
-            // by ensuring generateQuietPrompt is called with absolute minimal flags.
-            aiResponse = await generateQuietPrompt({ 
-                quietPrompt: prompt, 
-                quietToLoud: false, 
-                skipWIAN: true, 
-                skipAN: true,
-                skipCharacter: true, // Attempt to skip character context
-                skipWorldInfo: true,
-                quietName: 'System' 
+            console.log(`${LOG_PREFIX} Using SillyTavern generateRaw (Pure Mode)...`);
+            aiResponse = await generateRaw({ 
+                prompt: prompt, 
+                systemPrompt: '' 
             });
         }
 
@@ -751,15 +846,10 @@ ${snippet}]`;
             if (!res.ok) throw new Error(`Custom AI API Error: ${res.status}`);
             aiResponse = await res.json();
         } else {
-            console.log(`${LOG_PREFIX} Using SillyTavern generateQuietPrompt (Pure Mode)...`);
-            aiResponse = await generateQuietPrompt({ 
-                quietPrompt: prompt, 
-                quietToLoud: false, 
-                skipWIAN: true, 
-                skipAN: true,
-                skipCharacter: true,
-                skipWorldInfo: true,
-                quietName: 'System' 
+            console.log(`${LOG_PREFIX} Using SillyTavern generateRaw (Pure Mode)...`);
+            aiResponse = await generateRaw({ 
+                prompt: prompt, 
+                systemPrompt: '' 
             });
         }
 
@@ -789,8 +879,6 @@ ${snippet}]`;
         for (const track of tracks) {
             const query = `${track.Title || track.title} ${track.Artist || track.artist}`;
             await searchAndPlay(query);
-            // Небольшая задержка чтобы не спамить API поиска слишком быстро
-            await new Promise(r => setTimeout(r, 800));
         }
 
     } catch (e) {
