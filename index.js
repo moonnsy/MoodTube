@@ -369,7 +369,10 @@ async function handleBlockedVideo(failedTrack, index) {
     if (failedTrack.isExhausted || failedTrack.fallbackDepth > 4) {
         console.warn(`${LOG_PREFIX} Bypass exhausted for:`, failedTrack.title);
         failedTrack.isExhausted = true;
-        failedTrack.title = "❌ Заблокировано: " + failedTrack.title.replace("❌ Заблокировано: ", "");
+        if (!failedTrack.title.includes("❌")) {
+            failedTrack.title = "❌ Заблокировано: " + failedTrack.title;
+        }
+        updateQueueUI();
         if (currentQueueIndex === index) playNextInQueue();
         return;
     }
