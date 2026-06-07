@@ -363,7 +363,27 @@ function playPrevInQueue() {
         playTrack(track);
     }
 }
+async function getNetEaseStream(query) {
+    try {
+        // 1. Ищем ID песни
+        const searchRes = await fetchWithTimeout(`https://music-api.gdstudio.xyz/api.php?types=search&count=3&source=netease&name=${encodeURIComponent(query)}`, {}, 4000);
+        if (!searchRes.ok) return null;
+        const searchData = await searchRes.json();
+        if (!searchData || searchData.length === 0 || !searchData[0].id) return null;
 
+        // 2. Получаем прямую ссылку на mp3 по ID
+        const urlRes = await fetchWithTimeout(`https://music-api.gdstudio.xyz/api.php?types=url&source=netease&id=${searchData[0].id}`, {}, 4000);
+        if (!urlRes.ok) return null;
+        const urlData = await urlRes.json();
+        
+        if (urlData && urlData.url && urlData.url.startsWith("http")) {
+            return urlData.url;
+        }
+    } catch (e) {
+        console.warn(`${LOG_PREFIX} NetEase bypass failed`);
+    }
+    return null;
+}
 async function handleBlockedVideo(failedTrack, index) {
     failedTrack.fallbackDepth = (failedTrack.fallbackDepth || 0) + 1;
     if (failedTrack.isExhausted || failedTrack.fallbackDepth > 4) {
@@ -379,19 +399,38 @@ async function handleBlockedVideo(failedTrack, index) {
 
     console.log(`${LOG_PREFIX} Track blocked. Attempting bypass for:`, failedTrack.title);
     
-    // Ждем завершения префетча, если он идет
     if (failedTrack.prefetchPromise) {
         console.log(`${LOG_PREFIX} Waiting for prefetch to finish...`);
         await failedTrack.prefetchPromise;
     }
     
-    // ШАГ 1: Direct Stream (Piped / Invidious)
+    let baseSearch = failedTrack.originalQuery || failedTrack.title;
+    baseSearch = baseSearch.replace(/\b(official|music video|audio|hd|hq|lyrics|video)\b/gi, '').trim();
+
+    // ШАГ 1: Китайский фоллбэк (NetEase API) - СРАЗУ ПОСЛЕ ЮТУБА
+    if (!failedTrack.stepNetEaseAttempted) {
+        failedTrack.stepNetEaseAttempted = true;
+        if (currentQueueIndex === index) $('#moodtube-widget-title').text('Обход (1/3): NetEase API...');
+        
+        console.log(`${LOG_PREFIX} Attempting NetEase API bypass for:`, baseSearch);
+        const netEaseUrl = await getNetEaseStream(baseSearch);
+        
+        if (netEaseUrl) {
+            console.log(`${LOG_PREFIX} NetEase proxy stream found!`);
+            failedTrack.isFallback = true;
+            failedTrack.streamUrl = netEaseUrl; 
+            playAudioStream(failedTrack, netEaseUrl, index);
+            return;
+        }
+    }
+
+    // ШАГ 2: Direct Stream (Piped / Invidious)
     if (!failedTrack.step1Attempted) {
         failedTrack.step1Attempted = true;
         
         let streamUrl = failedTrack.streamUrl;
         if (!streamUrl) {
-            if (currentQueueIndex === index) $('#moodtube-widget-title').text('Обход (1/2): Прямой поток...');
+            if (currentQueueIndex === index) $('#moodtube-widget-title').text('Обход (2/3): Прямой поток...');
             streamUrl = await getPipedStream(failedTrack.videoId);
             if (!streamUrl) streamUrl = await getInvidiousStream(failedTrack.videoId);
         }
@@ -399,22 +438,20 @@ async function handleBlockedVideo(failedTrack, index) {
         if (streamUrl) {
             console.log(`${LOG_PREFIX} Direct stream found.`);
             failedTrack.isFallback = true;
-            failedTrack.streamUrl = streamUrl; // Save for recursive attempts
+            failedTrack.streamUrl = streamUrl; 
             playAudioStream(failedTrack, streamUrl, index);
             return;
         }
     }
 
-    // ШАГ 2: Крайний вариант — Поиск ремиксов/каверов
+    // ШАГ 3: Поиск ремиксов/каверов
     if (!failedTrack.step3Attempted) {
         failedTrack.step3Attempted = true;
-        if (currentQueueIndex === index) $('#moodtube-widget-title').text('Обход (2/2): Поиск замены...');
+        if (currentQueueIndex === index) $('#moodtube-widget-title').text('Обход (3/3): Поиск замены...');
         
         let fallbackInfo = failedTrack.fallbackInfo;
         if (!fallbackInfo) {
             const queries = ["remix", "cover", "live", "nightcore"];
-            let baseSearch = failedTrack.originalQuery || failedTrack.title;
-            baseSearch = baseSearch.replace(/\b(official|music video|audio|hd|hq|lyrics|video)\b/gi, '').trim();
             for (const q of queries) {
                 let res = await searchYouTube(baseSearch + " " + q);
                 if (res && res.videoId && res.videoId !== failedTrack.videoId) {
@@ -431,7 +468,6 @@ async function handleBlockedVideo(failedTrack, index) {
             fallbackInfo.originalQuery = failedTrack.originalQuery;
             trackQueue[index] = fallbackInfo;
             
-            // БОНУС: Новый трек будет прогнан через Шаг 0 (YouTube), а если он заблочен — снова через 1 и 2!
             if (currentQueueIndex === index) {
                 playTrack(fallbackInfo);
             } else {
@@ -440,7 +476,7 @@ async function handleBlockedVideo(failedTrack, index) {
             return;
         }
     }
-
+    
     // Финальное поражение
     console.error(`${LOG_PREFIX} All bypass attempts failed for:`, failedTrack.title);
     failedTrack.isExhausted = true;
@@ -448,7 +484,6 @@ async function handleBlockedVideo(failedTrack, index) {
     updateQueueUI();
     if (currentQueueIndex === index) {
         $('#moodtube-widget-title').text(failedTrack.title);
-        // Быстрый пропуск, чтобы не застревать
         setTimeout(() => playNextInQueue(), 150);
     }
 }
@@ -612,45 +647,62 @@ async function startBackgroundTester() {
                     track.title = track.title.replace("⏳ ", "⚠️ Обход: ");
                     updateQueueUI();
                     
-                    let streamUrl = await getPipedStream(track.videoId);
-                    if (!streamUrl) streamUrl = await getInvidiousStream(track.videoId);
+                    let baseSearch = track.originalQuery || track.title;
+                    baseSearch = baseSearch.replace(/\b(official|music video|audio|hd|hq|lyrics|video|⚠️ Обход:|⏳)\b/gi, '').trim();
+
+                    // ШАГ 1 (ДЛЯ ТЕСТЕРА): Сразу идем к китайцам (NetEase API)
+                    console.log(`${LOG_PREFIX} [Tester] Attempting NetEase API bypass for:`, baseSearch);
+                    const netEaseUrl = await getNetEaseStream(baseSearch);
                     
-                    if (streamUrl) {
-                        track.streamUrl = streamUrl;
-                        track.title = track.title.replace("⚠️ Обход: ", "");
+                    if (netEaseUrl) {
+                        console.log(`${LOG_PREFIX} [Tester] NetEase proxy stream found!`);
+                        track.streamUrl = netEaseUrl;
                         track.proactivelyBlocked = true;
                         track.isValidated = true;
+                        track.isFallback = true;
+                        track.title = track.originalQuery || baseSearch; // Возвращаем чистое название
                         updateQueueUI();
                     } else {
-                        // Ищем Cover
-                        const queries = ["lyrics", "remix", "cover", "live"];
-                        let baseSearch = track.originalQuery || track.title;
-                        baseSearch = baseSearch.replace(/\b(official|music video|audio|hd|hq|lyrics|video|⚠️ Обход:|⏳)\b/gi, '').trim();
-                        let foundFallback = false;
+                        // ШАГ 2 (ДЛЯ ТЕСТЕРА): Прямые потоки Piped / Invidious
+                        let streamUrl = await getPipedStream(track.videoId);
+                        if (!streamUrl) streamUrl = await getInvidiousStream(track.videoId);
                         
-                        for (const q of queries) {
-                            let res = await searchYouTube(baseSearch + " " + q);
-                            if (res && res.videoId && res.videoId !== track.videoId) {
-                                const isCoverPlayable = await testVideoPlayable(res.videoId);
-                                if (isCoverPlayable) {
-                                    track.videoId = res.videoId;
-                                    track.title = res.title;
-                                    track.videoThumbnails = res.videoThumbnails;
-                                    track.isValidated = true;
-                                    track.isFallback = true;
-                                    foundFallback = true;
-                                    break;
-                                }
-                            }
-                        }
-                        
-                        if (foundFallback) {
+                        if (streamUrl) {
+                            track.streamUrl = streamUrl;
+                            track.title = track.title.replace("⚠️ Обход: ", "");
+                            track.proactivelyBlocked = true;
+                            track.isValidated = true;
                             updateQueueUI();
                         } else {
-                            track.searchFailed = true;
-                            track.isValidated = true;
-                            track.title = "❌ Заблокировано: " + track.originalQuery;
-                            updateQueueUI();
+                            // ШАГ 3 (ДЛЯ ТЕСТЕРА): Ищем Cover/Remix/Live
+                            const queries = ["lyrics", "remix", "cover", "live"];
+                            let foundFallback = false;
+                            
+                            for (const q of queries) {
+                                let res = await searchYouTube(baseSearch + " " + q);
+                                if (res && res.videoId && res.videoId !== track.videoId) {
+                                    const isCoverPlayable = await testVideoPlayable(res.videoId);
+                                    if (isCoverPlayable) {
+                                        track.videoId = res.videoId;
+                                        track.title = res.title;
+                                        track.videoThumbnails = res.videoThumbnails;
+                                        track.isValidated = true;
+                                        track.isFallback = true;
+                                        foundFallback = true;
+                                        break;
+                                    }
+                                }
+                            }
+                            
+                            if (foundFallback) {
+                                updateQueueUI();
+                            } else {
+                                // Вот теперь точно всё, сдаемся
+                                track.searchFailed = true;
+                                track.isValidated = true;
+                                track.title = "❌ Заблокировано: " + track.originalQuery;
+                                updateQueueUI();
+                            }
                         }
                     }
                 }
