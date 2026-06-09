@@ -1,14 +1,14 @@
-﻿
+
 
 import { getContext } from '../../../extensions.js';
-import { generateRaw } from '../../../../script.js';
+import { generateRaw, eventSource, event_types } from '../../../../script.js';
 
 const extensionName = "MoodTube";
 const LOG_PREFIX = "[MoodTube]";
 
 // --- ПАЛИТРА ---
-const ACCENT_COLOR = '#8db7d5'; 
-const BG_COLOR = 'rgba(15, 20, 25, 0.75)'; 
+const ACCENT_COLOR = 'var(--mt-accent)'; 
+const BG_COLOR = 'var(--mt-bg-primary)'; 
 const BLUR_CSS = 'backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);';
 
 let isPlayerFolded = true;
@@ -363,6 +363,60 @@ function playPrevInQueue() {
         playTrack(track);
     }
 }
+// --- MP3 IndexedDB Cache ---
+const MT_DB_NAME = 'MoodTubeAudioDB';
+const MT_STORE_NAME = 'mp3_cache';
+
+function openMtDb() {
+    return new Promise((resolve, reject) => {
+        const req = indexedDB.open(MT_DB_NAME, 1);
+        req.onupgradeneeded = (e) => {
+            const db = e.target.result;
+            if (!db.objectStoreNames.contains(MT_STORE_NAME)) {
+                db.createObjectStore(MT_STORE_NAME);
+            }
+        };
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error);
+    });
+}
+
+async function saveMp3ToCache(videoId, blob) {
+    try {
+        const db = await openMtDb();
+        return new Promise((resolve, reject) => {
+            const tx = db.transaction(MT_STORE_NAME, 'readwrite');
+            const store = tx.objectStore(MT_STORE_NAME);
+            store.put(blob, videoId);
+            tx.oncomplete = () => resolve();
+            tx.onerror = () => reject(tx.error);
+        });
+    } catch(e) { console.warn(`${LOG_PREFIX} Failed to save MP3 to DB:`, e); }
+}
+
+async function getMp3FromCache(videoId) {
+    try {
+        const db = await openMtDb();
+        return new Promise((resolve, reject) => {
+            const tx = db.transaction(MT_STORE_NAME, 'readonly');
+            const store = tx.objectStore(MT_STORE_NAME);
+            const req = store.get(videoId);
+            req.onsuccess = () => resolve(req.result);
+            req.onerror = () => reject(req.error);
+        });
+    } catch(e) { return null; }
+}
+
+let activeObjectUrls = {};
+function getMp3ObjectUrl(videoId, blob) {
+    if (activeObjectUrls[videoId]) {
+        URL.revokeObjectURL(activeObjectUrls[videoId]);
+    }
+    const url = URL.createObjectURL(blob);
+    activeObjectUrls[videoId] = url;
+    return url;
+}
+
 async function getNetEaseStream(query) {
     try {
         // 1. Ищем ID песни
@@ -384,14 +438,15 @@ async function getNetEaseStream(query) {
     }
     return null;
 }
+let isMtBackgroundPrefetching = false;
+async function startBackgroundPrefetch() { return; }
+
 async function handleBlockedVideo(failedTrack, index) {
     failedTrack.fallbackDepth = (failedTrack.fallbackDepth || 0) + 1;
     if (failedTrack.isExhausted || failedTrack.fallbackDepth > 4) {
         console.warn(`${LOG_PREFIX} Bypass exhausted for:`, failedTrack.title);
         failedTrack.isExhausted = true;
-        if (!failedTrack.title.includes("❌")) {
-            failedTrack.title = "❌ Заблокировано: " + failedTrack.title;
-        }
+
         updateQueueUI();
         if (currentQueueIndex === index) playNextInQueue();
         return;
@@ -480,7 +535,7 @@ async function handleBlockedVideo(failedTrack, index) {
     // Финальное поражение
     console.error(`${LOG_PREFIX} All bypass attempts failed for:`, failedTrack.title);
     failedTrack.isExhausted = true;
-    failedTrack.title = "❌ Заблокировано: " + failedTrack.title.replace("❌ Заблокировано: ", "");
+
     updateQueueUI();
     if (currentQueueIndex === index) {
         $('#moodtube-widget-title').text(failedTrack.title);
@@ -492,30 +547,78 @@ function playAudioStream(track, streamUrl, index) {
     if (currentQueueIndex !== index) return;
     
     console.log(`${LOG_PREFIX} Bypassing YouTube iframe with direct stream.`);
+    
+    if (ytPlayer && typeof ytPlayer.stopVideo === 'function') {
+        try { ytPlayer.stopVideo(); } catch(e) {}
+    }
+    if (audioFallback) {
+        try { audioFallback.pause(); audioFallback.removeAttribute('src'); audioFallback.load(); } catch(e) {}
+    }
+
     isUsingAudioFallback = true;
     isCurrentlyPlaying = true;
     $('#moodtube-btn-playpause').attr('class', 'fa-solid fa-pause moodtube-ctrl');
+    
+    if (track.title.includes("Обход: ") || track.title.includes("Ожидание")) {
+        track.title = track.originalQuery || track.title.replace(/.*Обход: |.*Ожидание/gi, '').trim();
+    }
     $('#moodtube-widget-title').text(track.title);
+    
+    // Сбрасываем и устанавливаем обложку (из поиска или дефолт)
+    $('#moodtube-widget-cover').attr('src', 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7');
+    if (track.videoThumbnails && track.videoThumbnails.length > 0) {
+        $('#moodtube-widget-cover').attr('src', track.videoThumbnails[0].url);
+    } else if (track.videoId) {
+        $('#moodtube-widget-cover').attr('src', `https://i.ytimg.com/vi/${track.videoId}/mqdefault.jpg`);
+    }
+    
+    updateQueueUI();
     
     audioFallback.src = streamUrl;
     audioFallback.volume = currentVolume / 100;
     audioFallback.play().catch(e => {
         console.error(`${LOG_PREFIX} Audio playback failed`, e);
-        handleBlockedVideo(track, index); // Рекурсивно переходим к следующему шагу
+        track.stepNetEaseAttempted = false;
+        track.step1Attempted = false;
+        track.step3Attempted = false;
+        track.streamUrl = null;
+        handleBlockedVideo(track, index);
     });
+    
+    // Сбрасываем иконку сердечка
+    $('#moodtube-btn-favorite').removeClass('fa-solid').addClass('fa-regular');
 }
 
-function playTrack(videoInfo) {
-    if (!videoInfo || !videoInfo.videoId) return;
+async function playTrack(videoInfo) {
+    if (!videoInfo || (!videoInfo.videoId && !videoInfo.streamUrl)) return;
     
+    // Check if we have a cached Blob first!
+    if (videoInfo.videoId && !videoInfo.streamUrl) {
+        const cachedBlob = await getMp3FromCache(videoInfo.videoId);
+        if (cachedBlob) {
+            console.log(`${LOG_PREFIX} Playing from IndexedDB Cache!`);
+            videoInfo.isFallback = true;
+            videoInfo.streamUrl = getMp3ObjectUrl(videoInfo.videoId, cachedBlob);
+        }
+    }
+
+    // Explicitly stop any playing media to prevent overlapping
+    if (ytPlayer && typeof ytPlayer.stopVideo === 'function') {
+        try { ytPlayer.stopVideo(); } catch(e) {}
+    }
+    if (audioFallback) { 
+        try { audioFallback.pause(); audioFallback.removeAttribute('src'); audioFallback.load(); } catch(e) {} 
+        isUsingAudioFallback = false; 
+    }
+    isCurrentlyPlaying = false;
+
     if (sessionPlayedTracks[sessionPlayedTracks.length - 1] !== videoInfo.title) {
         sessionPlayedTracks.push(videoInfo.title);
     }
     
-    if (audioFallback) { audioFallback.pause(); isUsingAudioFallback = false; }
-
-    if (videoInfo.proactivelyBlocked) {
+    if (videoInfo.proactivelyBlocked || videoInfo.isFallback || videoInfo.streamUrl || videoInfo.fallbackInfo) {
         if (videoInfo.streamUrl) {
+            updateQueueUI();
             playAudioStream(videoInfo, videoInfo.streamUrl, trackQueue.indexOf(videoInfo));
             return;
         } else if (videoInfo.fallbackInfo) {
@@ -531,6 +634,8 @@ function playTrack(videoInfo) {
     const currentVideoId = videoInfo.videoId;
     $('#moodtube-widget-title').text(videoInfo.title || 'YouTube Track');
     
+    // Подтягиваем картинку и сбрасываем старую для избежания "залипания"
+    $('#moodtube-widget-cover').attr('src', 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7');
     const thumbUrl = `https://i.ytimg.com/vi/${currentVideoId}/mqdefault.jpg`;
     $('#moodtube-widget-cover')
         .off('error')
@@ -551,6 +656,9 @@ function playTrack(videoInfo) {
         console.warn(`${LOG_PREFIX} ytPlayer is not ready.`);
     }
     updateQueueUI();
+    
+    // Сбрасываем иконку сердечка
+    $('#moodtube-btn-favorite').removeClass('fa-solid').addClass('fa-regular');
 }
 
 function enqueueQuery(query) {
@@ -700,7 +808,7 @@ async function startBackgroundTester() {
                                 // Вот теперь точно всё, сдаемся
                                 track.searchFailed = true;
                                 track.isValidated = true;
-                                track.title = "❌ Заблокировано: " + track.originalQuery;
+
                                 updateQueueUI();
                             }
                         }
@@ -727,13 +835,140 @@ async function searchAndPlay(query) {
     return true;
 }
 
-function updateQueueUI() {
+function getActiveChatId() {
+    try {
+        const ctx = getContext();
+        if (!ctx) return null;
+        return ctx.chatId || ctx.groupId || (ctx.characterId !== undefined ? String(ctx.characterId) : null);
+    } catch { return null; }
+}
+
+let currentLoadedChatId = null;
+
+function saveQueueCache() {
+    if (!currentLoadedChatId) return;
+    const chatId = getActiveChatId();
+    if (!chatId || chatId !== currentLoadedChatId) return;
+    let cache = {};
+    try { cache = JSON.parse(localStorage.getItem('moodtube_queue_cache') || '{}'); } catch(e){}
+    const safeQueue = trackQueue.map(t => {
+        let copy = { ...t };
+        delete copy.prefetchPromise;
+        if (copy.streamUrl && copy.streamUrl.startsWith('blob:')) {
+            copy.streamUrl = null;
+        }
+        return copy;
+    });
+    cache[chatId] = {
+        queue: safeQueue,
+        currentIndex: currentQueueIndex,
+        playedTracks: sessionPlayedTracks
+    };
+    try {
+        localStorage.setItem('moodtube_queue_cache', JSON.stringify(cache));
+    } catch(e) {
+        console.error('[MoodTube] Failed to save queue cache', e);
+    }
+}
+
+function clearQueueState(skipSave = false) {
+    trackQueue = [];
+    currentQueueIndex = -1;
+    sessionPlayedTracks = [];
+    updateQueueUI(skipSave);
+    if (ytPlayer && typeof ytPlayer.stopVideo === 'function') ytPlayer.stopVideo();
+    if (audioFallback) { audioFallback.pause(); isUsingAudioFallback = false; }
+    isCurrentlyPlaying = false;
+    $('#moodtube-widget-title').text('No Track Selected');
+    $('#moodtube-btn-playpause').attr('class', 'fa-solid fa-play moodtube-ctrl');
+    $('#moodtube-widget-cover').attr('src', 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7');
+}
+
+let mtInitialRestoreDone = false;
+
+function restoreQueueCache() {
+    const chatId = getActiveChatId();
+    if (!chatId) {
+        if (!mtInitialRestoreDone) {
+            setTimeout(restoreQueueCache, 500);
+            return;
+        }
+        clearQueueState();
+        return;
+    }
+
+    if (mtInitialRestoreDone && currentLoadedChatId === chatId) {
+        return;
+    }
+
+    mtInitialRestoreDone = true;
+    currentLoadedChatId = chatId;
+    let cache = {};
+    try { cache = JSON.parse(localStorage.getItem('moodtube_queue_cache') || '{}'); } catch(e){}
+    if (cache[chatId] && cache[chatId].queue) {
+        const c = cache[chatId];
+        trackQueue = c.queue || [];
+        trackQueue.forEach(t => {
+            if (t.streamUrl && t.streamUrl.startsWith('blob:')) t.streamUrl = null;
+        });
+        currentQueueIndex = c.currentIndex !== undefined ? c.currentIndex : -1;
+        sessionPlayedTracks = c.playedTracks || [];
+        updateQueueUI(true);
+        if (currentQueueIndex >= 0 && currentQueueIndex < trackQueue.length) {
+            const track = trackQueue[currentQueueIndex];
+            $('#moodtube-widget-title').text(track.title || 'YouTube Track');
+            if (track.videoThumbnails && track.videoThumbnails.length > 0) {
+                $('#moodtube-widget-cover').attr('src', track.videoThumbnails[0].url);
+            } else if (track.videoId) {
+                $('#moodtube-widget-cover').attr('src', `https://i.ytimg.com/vi/${track.videoId}/mqdefault.jpg`);
+            } else {
+                $('#moodtube-widget-cover').attr('src', 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7');
+            }
+            if (ytPlayer && typeof ytPlayer.stopVideo === 'function') ytPlayer.stopVideo();
+            if (audioFallback) { audioFallback.pause(); isUsingAudioFallback = false; }
+            isCurrentlyPlaying = false;
+            $('#moodtube-btn-playpause').attr('class', 'fa-solid fa-play moodtube-ctrl');
+            
+            if (track.isFallback || track.streamUrl) {
+                isUsingAudioFallback = true;
+                if (track.streamUrl) {
+                    audioFallback.src = track.streamUrl;
+                    audioFallback.load();
+                } else if (track.videoId) {
+                    getMp3FromCache(track.videoId).then(cachedBlob => {
+                        if (cachedBlob) {
+                            track.streamUrl = getMp3ObjectUrl(track.videoId, cachedBlob);
+                            if (currentQueueIndex >= 0 && trackQueue[currentQueueIndex] === track) {
+                                audioFallback.src = track.streamUrl;
+                                audioFallback.load();
+                            }
+                        }
+                    });
+                }
+            } else if (track.videoId && ytPlayer && typeof ytPlayer.cueVideoById === 'function') {
+                try { ytPlayer.cueVideoById(track.videoId); } catch(e) {}
+            }
+        } else {
+            $('#moodtube-widget-title').text(trackQueue.length > 0 ? (currentQueueIndex >= trackQueue.length ? 'Queue finished' : 'Ready to play') : 'No Track Selected');
+            $('#moodtube-widget-cover').attr('src', 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7');
+            if (ytPlayer && typeof ytPlayer.stopVideo === 'function') ytPlayer.stopVideo();
+            if (audioFallback) { audioFallback.pause(); isUsingAudioFallback = false; }
+            isCurrentlyPlaying = false;
+            $('#moodtube-btn-playpause').attr('class', 'fa-solid fa-play moodtube-ctrl');
+        }
+    } else {
+        clearQueueState(true);
+    }
+}
+
+function updateQueueUI(skipSave = false) {
     const $qList = $('#moodtube-queue-list');
     if (!$qList.length) return;
     
     $qList.empty();
     if (trackQueue.length === 0) {
         $qList.append('<div style="font-size:12px; color:#888; text-align:center; padding:10px;">Очередь пуста</div>');
+        if (!skipSave) saveQueueCache();
         return;
     }
 
@@ -743,13 +978,15 @@ function updateQueueUI() {
             <div class="moodtube-queue-item" style="
                 display:flex; align-items:center; gap:10px; padding:8px 10px; 
                 cursor:pointer; border-radius:10px; margin-bottom:5px;
-                background: ${isCurrent ? 'rgba(141, 183, 213, 0.2)' : 'rgba(0,0,0,0.3)'};
-                border: 1px solid ${isCurrent ? ACCENT_COLOR : 'transparent'};
+                background: ${isCurrent ? 'rgba(255, 255, 255, 0.05)' : 'rgba(0,0,0,0.3)'};
+                border: 1px solid ${isCurrent ? 'var(--mt-accent)' : 'transparent'};
                 transition: 0.2s;
             ">
-                <img src="${track.videoId ? `https://i.ytimg.com/vi/${track.videoId}/default.jpg` : 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7'}" style="width:30px; height:30px; border-radius:5px; object-fit:cover; ${!track.videoId ? 'background:rgba(255,255,255,0.1);' : ''}">
-                <span style="font-size:12px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; flex:1; color:${isCurrent ? '#fff' : '#aaa'};">${track.title}</span>
-                ${isCurrent ? '<i class="fa-solid fa-volume-high" style="color:' + ACCENT_COLOR + '; font-size:10px; margin-right:5px;"></i>' : ''}
+                <img src="${track.videoId ? `https://i.ytimg.com/vi/${track.videoId}/default.jpg` : 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7'}" style="width:30px; height:30px; border-radius:5px; object-fit:cover; flex-shrink:0; ${!track.videoId ? 'background:rgba(255,255,255,0.1);' : ''}">
+                <span style="font-size:12px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; flex:1; color:${track.isExhausted ? '#ff6b6b' : (isCurrent ? '#fff' : '#aaa')};">
+                    ${track.isExhausted ? '❌ Заблокировано: ' : ''}${track.title}
+                </span>
+                ${isCurrent ? '<i class="fa-solid fa-volume-high" style="color:var(--mt-accent); font-size:10px; margin-right:5px;"></i>' : ''}
                 <div class="moodtube-btn-dislike moodtube-ctrl" style="width:16px; height:16px; background-color:rgba(235, 120, 120, 0.65); -webkit-mask: url(https://img.icons8.com/ios-filled/50/dislike.png) no-repeat center / contain; mask: url(https://img.icons8.com/ios-filled/50/dislike.png) no-repeat center / contain; cursor:pointer;" title="Не нравится (В бан-лист)"></div>
             </div>
         `);
@@ -762,13 +999,15 @@ function updateQueueUI() {
 
         $item.find('.moodtube-btn-dislike').on('click', (e) => {
             e.stopPropagation();
-            let currentBannedSongs = localStorage.getItem('moodtube_ai_banned_songs') || '';
+            let currentBannedSongs = getMtSetting('banned_songs');
             const songToBan = `${track.title} ${track.artist || track.Artist || ''}`.trim();
-            if (songToBan) {
+            if (songToBan && !currentBannedSongs.includes(songToBan)) {
                 currentBannedSongs = currentBannedSongs ? currentBannedSongs + ', ' + songToBan : songToBan;
-                localStorage.setItem('moodtube_ai_banned_songs', currentBannedSongs);
+                saveMtSetting('banned_songs', currentBannedSongs);
                 $('#moodtube-setting-banned-songs').val(currentBannedSongs);
                 toastr.success(`Трек добавлен в исключения`);
+            } else if (currentBannedSongs.includes(songToBan)) {
+                toastr.info(`Трек уже в исключениях`);
             }
             
             trackQueue.splice(index, 1);
@@ -785,9 +1024,38 @@ function updateQueueUI() {
         
         $qList.append($item);
     });
+    
+    if (!skipSave) saveQueueCache();
 }
 
 // --- ВШИТЫЙ ИИ-ПРОМТ ---
+function getMtSetting(key) {
+    const chatId = getActiveChatId();
+    if (chatId) {
+        let data = {};
+        try { data = JSON.parse(localStorage.getItem('moodtube_chat_data') || '{}'); } catch(e){}
+        if (data[chatId] && data[chatId][key] !== undefined) return data[chatId][key];
+    }
+    return '';
+}
+
+function saveMtSetting(key, val) {
+    const chatId = getActiveChatId();
+    if (chatId) {
+        let data = {};
+        try { data = JSON.parse(localStorage.getItem('moodtube_chat_data') || '{}'); } catch(e){}
+        if (!data[chatId]) data[chatId] = {};
+        data[chatId][key] = val;
+        localStorage.setItem('moodtube_chat_data', JSON.stringify(data));
+    }
+}
+
+function applyTheme(theme) {
+    document.documentElement.setAttribute('data-mt-theme', theme || 'blue');
+    $('#mt-settings-modal').attr('data-mt-theme', theme || 'blue');
+    $('#moodtube-mini-player').attr('data-mt-theme', theme || 'blue');
+}
+
 async function triggerMoodAnalysisAndPlay() {
     if (isAnalysisInProgress) return;
     
@@ -803,11 +1071,14 @@ async function triggerMoodAnalysisAndPlay() {
         
         const snippet = context.chat.slice(-15).map(m => `${m.is_user ? 'User' : 'Character'}: ${m.mes}`).join('\n');
         
-        let genre = localStorage.getItem('moodtube_ai_genre') || '';
-        let scenario = localStorage.getItem('moodtube_ai_scenario') || '';
-        let banlist = localStorage.getItem('moodtube_ai_banlist') || '';
-        let bannedSongs = localStorage.getItem('moodtube_ai_banned_songs') || '';
-        let customPrompt = localStorage.getItem('moodtube_ai_custom') || '';
+        let genre = getMtSetting('genre');
+        let scenario = getMtSetting('scenario');
+        let banlist = getMtSetting('banlist');
+        let bannedSongs = getMtSetting('banned_songs');
+        let customPrompt = getMtSetting('custom');
+        let hardRule = getMtSetting('hard_rule');
+        let favoritesList = getMtSetting('favorites');
+        let favoritesContext = getMtSetting('favorites_context') === 'true';
         
         let antiRepeatStr = sessionPlayedTracks.length > 0 
             ? `\nDo NOT pick any of these already played songs: ${sessionPlayedTracks.slice(-20).join(', ')}` 
@@ -820,14 +1091,24 @@ async function triggerMoodAnalysisAndPlay() {
         if (genre.trim()) styleStr += `\nPreferred Genre/Style: ${genre}`;
         if (scenario.trim()) styleStr += `\nCurrent Scenario/Vibe: ${scenario}`;
         
+        let favStr = '';
+        if (favoritesContext && favoritesList.trim()) {
+            favStr = `\nPrioritize these favorite tracks if they fit the mood: ${favoritesList}`;
+        }
+
         let rusrealRule = (scenario.includes('Русреал') || genre.includes('Русреал')) ? "\nRule: If the scenario or genre is 'Русреал', select ONLY Russian songs and artists (Russian language lyrics)." : "";
+
+        let hardRuleStr = hardRule.trim() ? `\nCRITICAL HARD RULE: The user has EXPLICITLY requested the following artist, song, or theme: "${hardRule}". You MUST fulfill this request precisely, filling the Title and Artist fields accordingly. IGNORE all other tags, rules, or context.` : '';
+
+        const bulkCount = parseInt(localStorage.getItem('moodtube_ai_bulk_count') || 10, 10);
+        const isBulk = bulkCount > 1;
 
         let defaultPrompt = `[SYSTEM NOTE: CRITICAL OVERRIDE. YOU ARE A STRICT METADATA API. 
 DO NOT ROLEPLAY. DO NOT SPEAK AS THE CHARACTER. NO GREETINGS. NO CONVERSATION.
-Read the chat history and output ONLY a valid JSON object.
+Read the chat history and output ONLY a valid JSON ${isBulk ? `array containing exactly ${bulkCount} track objects` : 'object'}.
 Rule 1: If a song is mentioned in the text, select it.
-Rule 2: Otherwise, choose a fitting mood track. ${styleStr} ${antiRepeatStr} ${banListStr} ${rusrealRule}
-Format strictly: {"Title": "Song Name", "Artist": "Artist Name"}
+Rule 2: Otherwise, choose fitting track(s) based on the mood. ${styleStr} ${antiRepeatStr} ${banListStr} ${favStr} ${rusrealRule} ${hardRuleStr}
+Format strictly: ${isBulk ? '[{"Title": "Song Name", "Artist": "Artist Name"}, ...]' : '{"Title": "Song Name", "Artist": "Artist Name"}'}
 
 Chat History:
 ${snippet}]`;
@@ -839,34 +1120,57 @@ ${snippet}]`;
         
         console.log(`${LOG_PREFIX} --- AI Request Prompt ---\n`, prompt);
 
-        const customEnable = localStorage.getItem('moodtube_ai_enable') === 'true';
-        let customUrl = localStorage.getItem('moodtube_ai_url');
-        if (customUrl && !customUrl.endsWith('/chat/completions')) {
-            customUrl = customUrl.replace(/\/+$/, '') + '/chat/completions';
-        }
-        const customKey = localStorage.getItem('moodtube_ai_key');
-        const customModel = localStorage.getItem('moodtube_ai_model') || 'gpt-3.5-turbo';
-
+        const stContext = typeof SillyTavern !== 'undefined' ? SillyTavern.getContext() : getContext();
+        const currentProfileName = localStorage.getItem('moodtube_active_profile_name') || '';
         let aiResponse;
         
-        if (customEnable && customUrl && customKey) {
-            console.log(`${LOG_PREFIX} Using Custom AI Endpoint...`);
-            const res = await fetch(customUrl, {
+        if (currentProfileName) {
+            console.log(`${LOG_PREFIX} Using Connection Profile: ${currentProfileName}`);
+            const profiles = stContext?.extensionSettings?.connectionManager?.profiles || [];
+            const profile = profiles.find(p => p.name === currentProfileName);
+            
+            if (!profile) throw new Error(`Профиль '${currentProfileName}' не найден. Проверьте настройки.`);
+            
+            const cc_source = profile.api || 'openai';
+            let generate_data = {
+                'messages': [{ role: 'user', content: prompt }],
+                'model': profile.model,
+                'temperature': isBulk ? 0.8 : 0.3,
+                'stream': false,
+                'chat_completion_source': cc_source,
+            };
+            
+            const profileApiValue = profile['api-url'];
+            if (cc_source === 'custom' && profileApiValue) {
+                let url = profileApiValue.trim().replace(/\/+$/, '');
+                generate_data['custom_url'] = url;
+                const ccSettings = stContext.chatCompletionSettings || {};
+                if (ccSettings.custom_prompt_post_processing) generate_data['custom_prompt_post_processing'] = ccSettings.custom_prompt_post_processing;
+                if (ccSettings.custom_include_body) generate_data['custom_include_body'] = ccSettings.custom_include_body;
+                if (ccSettings.custom_exclude_body) generate_data['custom_exclude_body'] = ccSettings.custom_exclude_body;
+                if (ccSettings.custom_include_headers) generate_data['custom_include_headers'] = ccSettings.custom_include_headers;
+            } else if (cc_source === 'vertexai' && profileApiValue) {
+                generate_data['vertexai_region'] = profileApiValue;
+                const ccSettings = stContext.chatCompletionSettings || {};
+                if (ccSettings.vertexai_auth_mode) generate_data['vertexai_auth_mode'] = ccSettings.vertexai_auth_mode;
+                if (ccSettings.vertexai_express_project_id) generate_data['vertexai_express_project_id'] = ccSettings.vertexai_express_project_id;
+            } else if (cc_source === 'zai' && profileApiValue) {
+                generate_data['zai_endpoint'] = profileApiValue;
+            }
+
+            const headers = (typeof stContext.getRequestHeaders === 'function') ? stContext.getRequestHeaders() : {'Content-Type': 'application/json'};
+            const res = await fetch('/api/backends/chat-completions/generate', {
                 method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${customKey}`
-                },
-                body: JSON.stringify({
-                    model: customModel,
-                    messages: [{ role: 'user', content: prompt }],
-                    temperature: 0.3
-                })
+                headers: headers,
+                body: JSON.stringify(generate_data)
             });
-            if (!res.ok) throw new Error(`Custom AI API Error: ${res.status}`);
+            if (!res.ok) {
+                const errData = await res.json().catch(() => ({error: {message: res.statusText}}));
+                throw new Error(`API Error ${res.status}: ${errData.error?.message || 'Unknown'}`);
+            }
             aiResponse = await res.json();
         } else {
-            console.log(`${LOG_PREFIX} Using SillyTavern generateRaw (Pure Mode)...`);
+            console.log(`${LOG_PREFIX} Using SillyTavern generateRaw (Tavern API)...`);
             aiResponse = await generateRaw({ 
                 prompt: prompt, 
                 systemPrompt: '' 
@@ -879,19 +1183,42 @@ ${snippet}]`;
 
         // Умное извлечение текста из любых сложных объектов от API
         let aiText = extractAIText(aiResponse);
-        
         console.log(`${LOG_PREFIX} --- Parsed AI Text ---\n`, aiText);
         
-        let parsed = parseAISongJSON(aiText);
+        if (isBulk) {
+            let tracks = [];
+            const blockMatch = aiText.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+            if (blockMatch) {
+                try { tracks = JSON.parse(blockMatch[1]); } catch(e) {}
+            }
+            if (!tracks || tracks.length === 0) {
+                const arrayMatch = aiText.match(/\[\s*\{[\s\S]*\}\s*\]/);
+                if (arrayMatch) {
+                    try { tracks = JSON.parse(arrayMatch[0]); } catch(e) {}
+                }
+            }
 
-        if (!parsed || (!parsed.Title && !parsed.title)) {
-            console.error(`${LOG_PREFIX} Extracted string failed parsing:`, aiText);
-            throw new Error("No valid JSON or song info found in response");
+            if (!Array.isArray(tracks) || tracks.length === 0) {
+                throw new Error("Could not parse bulk tracks array");
+            }
+
+            toastr.success(`MoodTube: Генерирую очередь из ${tracks.length} треков...`);
+
+            for (const track of tracks) {
+                const query = `${track.Title || track.title} ${track.Artist || track.artist}`;
+                await searchAndPlay(query);
+            }
+        } else {
+            let parsed = parseAISongJSON(aiText);
+
+            if (!parsed || (!parsed.Title && !parsed.title)) {
+                console.error(`${LOG_PREFIX} Extracted string failed parsing:`, aiText);
+                throw new Error("No valid JSON or song info found in response");
+            }
+            
+            const searchQuery = `${parsed.Title || parsed.title} ${parsed.Artist || parsed.artist}`;
+            await searchAndPlay(searchQuery);
         }
-        
-        const searchQuery = `${parsed.Title || parsed.title} ${parsed.Artist || parsed.artist}`;
-        
-        await searchAndPlay(searchQuery);
 
     } catch (e) {
         console.error(`${LOG_PREFIX} DJ AI Parse Error:`, e);
@@ -904,9 +1231,11 @@ ${snippet}]`;
 
 function extractAIText(aiResponse) {
     if (typeof aiResponse === 'string') return aiResponse;
+    if (aiResponse.content && typeof aiResponse.content === 'string') return aiResponse.content;
     if (aiResponse.text) return aiResponse.text;
     if (aiResponse.candidates?.[0]?.content?.parts?.[0]?.text) return aiResponse.candidates[0].content.parts[0].text;
     if (aiResponse.choices?.[0]?.message?.content) return aiResponse.choices[0].message.content;
+    if (aiResponse.choices?.[0]?.text) return aiResponse.choices[0].text;
     return JSON.stringify(aiResponse);
 }
 
@@ -944,117 +1273,6 @@ function parseAISongJSON(aiText) {
     return parsed;
 }
 
-// --- БАЛК-ГЕНЕРАЦИЯ (10 треков) ---
-async function triggerBulkMoodAnalysisAndPlay() {
-    if (isAnalysisInProgress) return;
-    
-    $('#moodtube-btn-bulk-ai').css('color', '#00ff00').addClass('fa-spin');
-    isAnalysisInProgress = true;
-
-    try {
-        const context = getContext();
-        if (!context?.chat?.length) {
-            toastr.warning("DJ AI: Чат пуст!");
-            return;
-        }
-        
-        const snippet = context.chat.slice(-20).map(m => `${m.is_user ? 'User' : 'Character'}: ${m.mes}`).join('\n');
-        
-        let genre = localStorage.getItem('moodtube_ai_genre') || '';
-        let scenario = localStorage.getItem('moodtube_ai_scenario') || '';
-        let banlist = localStorage.getItem('moodtube_ai_banlist') || '';
-        let bannedSongs = localStorage.getItem('moodtube_ai_banned_songs') || '';
-        
-        let antiRepeatStr = sessionPlayedTracks.length > 0 
-            ? `\nDo NOT pick any of these already played songs: ${sessionPlayedTracks.slice(-20).join(', ')}` 
-            : '';
-            
-        let banListStr = '';
-        if (banlist.trim()) banListStr += `\nDo NOT pick any songs from these artists: ${banlist}`;
-        if (bannedSongs.trim()) banListStr += `\nDo NOT pick any of these specific songs: ${bannedSongs}`;
-        let styleStr = '';
-        if (genre.trim()) styleStr += `\nPreferred Genre/Style: ${genre}`;
-        if (scenario.trim()) styleStr += `\nCurrent Scenario/Vibe: ${scenario}`;
-        
-        let rusrealRule = (scenario.includes('Русреал') || genre.includes('Русреал')) ? "\nRule: If the scenario or genre is 'Русреал', select ONLY Russian songs and artists (Russian language lyrics)." : "";
-
-        const bulkCount = parseInt($('#moodtube-bulk-count').val(), 10) || 10;
-        let prompt = `[SYSTEM NOTE: CRITICAL OVERRIDE. YOU ARE A STRICT METADATA API. 
-DO NOT ROLEPLAY. DO NOT SPEAK AS THE CHARACTER. NO GREETINGS. NO CONVERSATION.
-Read the chat history and output ONLY a valid JSON array containing exactly ${bulkCount} track objects.
-Choose fitting tracks based on the mood and scenario. ${styleStr} ${antiRepeatStr} ${banListStr} ${rusrealRule}
-Format strictly: [{"Title": "Song Name", "Artist": "Artist Name"}, ...]
-
-Chat History:
-${snippet}]`;
-
-        console.log(`${LOG_PREFIX} --- Bulk AI Request Prompt ---\n`, prompt);
-
-        const customEnable = localStorage.getItem('moodtube_ai_enable') === 'true';
-        let customUrl = localStorage.getItem('moodtube_ai_url');
-        if (customUrl && !customUrl.endsWith('/chat/completions')) {
-            customUrl = customUrl.replace(/\/+$/, '') + '/chat/completions';
-        }
-        const customKey = localStorage.getItem('moodtube_ai_key');
-        const customModel = localStorage.getItem('moodtube_ai_model') || 'gpt-3.5-turbo';
-
-        let aiResponse;
-        if (customEnable && customUrl && customKey) {
-            const res = await fetch(customUrl, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${customKey}` },
-                body: JSON.stringify({
-                    model: customModel,
-                    messages: [{ role: 'user', content: prompt }],
-                    temperature: 0.8
-                })
-            });
-            if (!res.ok) throw new Error(`Custom AI API Error: ${res.status}`);
-            aiResponse = await res.json();
-        } else {
-            console.log(`${LOG_PREFIX} Using SillyTavern generateRaw (Pure Mode)...`);
-            aiResponse = await generateRaw({ 
-                prompt: prompt, 
-                systemPrompt: '' 
-            });
-        }
-
-        if (!aiResponse) throw new Error("AI Timeout");
-        
-        let aiText = extractAIText(aiResponse);
-        console.log(`${LOG_PREFIX} --- Raw Bulk Response ---\n`, aiText);
-
-        let tracks = [];
-        const blockMatch = aiText.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
-        if (blockMatch) {
-            try { tracks = JSON.parse(blockMatch[1]); } catch(e) {}
-        }
-        if (!tracks || tracks.length === 0) {
-            const arrayMatch = aiText.match(/\[\s*\{[\s\S]*\}\s*\]/);
-            if (arrayMatch) {
-                try { tracks = JSON.parse(arrayMatch[0]); } catch(e) {}
-            }
-        }
-
-        if (!Array.isArray(tracks) || tracks.length === 0) {
-            throw new Error("Could not parse bulk tracks array");
-        }
-
-        toastr.success(`MoodTube: Генерирую очередь из ${tracks.length} треков...`);
-
-        for (const track of tracks) {
-            const query = `${track.Title || track.title} ${track.Artist || track.artist}`;
-            await searchAndPlay(query);
-        }
-
-    } catch (e) {
-        console.error(`${LOG_PREFIX} Bulk AI Error:`, e);
-        toastr.error(`Bulk DJ Error: ${e.message}`);
-    } finally {
-        isAnalysisInProgress = false;
-        $('#moodtube-btn-bulk-ai').css('color', ACCENT_COLOR).removeClass('fa-spin');
-    }
-}
 
 // --- ФИЗИКА ПЕРЕТАСКИВАНИЯ И ИЗМЕНЕНИЯ РАЗМЕРА ---
 function handleDrag($el, storageKey) {
@@ -1144,7 +1362,7 @@ function attachToUI() {
     if ($('#extensionsMenu').length > 0 && $('#moodtube-menu-item-container').length === 0) {
         $('#extensionsMenu').append(`
             <div id="moodtube-menu-item-container" class="extension_container interactable" tabindex="0">
-                <div id="moodtube-wand-item" class="list-group-item flex-container flexGap5 interactable" tabindex="0" style="color: ${ACCENT_COLOR};">
+                <div id="moodtube-wand-item" class="list-group-item flex-container flexGap5 interactable" tabindex="0" style="color: var(--mt-accent);">
                     <i class="fa-solid fa-music" style="width: 20px; text-align: center;"></i>
                     <span>MoodTube</span>
                 </div>
@@ -1164,10 +1382,50 @@ async function initializeExtension() {
     }
     loadYouTubeAPI();
 
-    $(`<style>
-        .moodtube-ctrl:hover { color: ${ACCENT_COLOR} !important; transform: scale(1.1); transition: 0.2s; }
+    $(`<style id="moodtube-theme-css">
+        :root, [data-mt-theme="blue"] {
+            --mt-accent: #8db7d5; --mt-accent-hover: #a5d0f0;
+            --mt-bg-primary: rgba(15,20,25,0.88); --mt-bg-secondary: rgba(22,28,35,0.88);
+            --mt-bg-input: rgba(10,15,20,0.6); --mt-border: rgba(141,183,213,0.3);
+        }
+        [data-mt-theme="grey"] {
+            --mt-accent: #9CA3AF; --mt-accent-hover: #D1D5DB;
+            --mt-bg-primary: rgba(31,31,35,0.88); --mt-bg-secondary: rgba(40,40,46,0.88);
+            --mt-bg-input: rgba(25,25,30,0.6); --mt-border: rgba(156,163,175,0.3);
+        }
+        [data-mt-theme="rose"] {
+            --mt-accent: #b87575; --mt-accent-hover: #cc9090;
+            --mt-bg-primary: rgba(24,19,26,0.88); --mt-bg-secondary: rgba(32,24,32,0.88);
+            --mt-bg-input: rgba(20,15,22,0.6); --mt-border: #3d2d3a;
+        }
+        [data-mt-theme="emerald"] {
+            --mt-accent: #86bfa0; --mt-accent-hover: #9cd5b6;
+            --mt-bg-primary: rgba(24,28,26,0.88); --mt-bg-secondary: rgba(34,38,36,0.88);
+            --mt-bg-input: rgba(20,24,22,0.6); --mt-border: rgba(134,191,160,0.3);
+        }
+        [data-mt-theme="auto"] {
+            --mt-accent: var(--SmartThemeQuoteColor, var(--mainColor, #8db7d5));
+            --mt-accent-hover: var(--SmartThemeQuoteColor, var(--mainColor, #a5d0f0));
+            --mt-bg-primary: var(--SmartThemeBlurTintColor, rgba(15,20,25,0.88));
+            --mt-bg-secondary: var(--SmartThemeBotMesBlurTintColor, rgba(22,28,35,0.88));
+            --mt-bg-input: var(--black50a, rgba(10,15,20,0.6));
+            --mt-border: var(--SmartThemeQuoteColor, var(--mainColor, rgba(141,183,213,0.3)));
+        }
+        
+        @keyframes mt-spin { 100% { transform: rotate(360deg); } }
+        #moodtube-fab.mt-playing::before {
+            content: ''; position: absolute;
+            top: -2px; left: -2px; right: -2px; bottom: -2px;
+            border-radius: 50%;
+            border: 2px solid transparent;
+            border-top-color: var(--mt-accent);
+            animation: mt-spin 1s linear infinite;
+            pointer-events: none;
+        }
+        
+        .moodtube-ctrl:hover { color: var(--mt-accent) !important; transform: scale(1.1); transition: 0.2s; }
         .moodtube-slider { -webkit-appearance: none; width: 100%; height: 4px; background: rgba(255,255,255,0.1); border-radius: 2px; outline: none; margin: 0 10px; }
-        .moodtube-slider::-webkit-slider-thumb { -webkit-appearance: none; appearance: none; width: 14px; height: 14px; border-radius: 50%; background: ${ACCENT_COLOR}; cursor: pointer; border: 2px solid #fff; box-shadow: 0 0 5px rgba(0,0,0,0.5); }
+        .moodtube-slider::-webkit-slider-thumb { -webkit-appearance: none; appearance: none; width: 14px; height: 14px; border-radius: 50%; background: var(--mt-accent); cursor: pointer; border: 2px solid #fff; box-shadow: 0 0 5px rgba(0,0,0,0.5); }
         
         #moodtube-mini-player { transition: opacity 0.3s; }
         #moodtube-inner-content { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 15px; width: 100%; height: 100%; box-sizing: border-box; }
@@ -1182,6 +1440,7 @@ async function initializeExtension() {
         /* Minimal Layout (Hidden elements) */
         .moodtube-no-cover #moodtube-cover-container { display: none !important; }
         .moodtube-no-vol #moodtube-volume-container { display: none !important; }
+        .moodtube-no-vol #moodtube-progress-container { display: none !important; }
         .moodtube-no-title #moodtube-title-container { display: none !important; }
     </style>`).appendTo('head');
 
@@ -1202,44 +1461,54 @@ async function initializeExtension() {
         $(`
         <div id="moodtube-mini-player" style="
             position: fixed; top: 150px; left: 50%; transform: translateX(-50%);
-            background: ${BG_COLOR}; border: 1px solid rgba(141, 183, 213, 0.3);
+            background: ${BG_COLOR}; border: 1px solid var(--mt-border);
             border-radius: 20px; padding: 20px; color: #fff;
             font-family: -apple-system, sans-serif;
             z-index: 9998; display: none; 
-            box-shadow: 0 15px 35px rgba(0,0,0,0.8), inset 0 0 10px rgba(141, 183, 213, 0.1); 
+            box-shadow: 0 15px 35px rgba(0,0,0,0.8), inset 0 0 10px rgba(255, 255, 255, 0.05); 
             width: ${savedW}; height: ${savedH}; ${BLUR_CSS} cursor: grab; user-select: none;
             box-sizing: border-box; overflow: hidden;
         ">
             <div id="moodtube-inner-content">
-                <div id="moodtube-cover-container" style="width: 140px; height: 140px; border-radius: 50%; background: #050505; border: 3px solid ${ACCENT_COLOR}; box-shadow: 0 5px 15px rgba(0,0,0,0.7); display: flex; justify-content: center; align-items: center; position: relative; overflow: hidden; flex-shrink: 0; transition: 0.3s all;">
+                <div id="moodtube-cover-container" style="width: 140px; height: 140px; border-radius: 50%; background: #050505; border: 3px solid var(--mt-accent); box-shadow: 0 5px 15px rgba(0,0,0,0.7); display: flex; justify-content: center; align-items: center; position: relative; overflow: hidden; flex-shrink: 0; transition: 0.3s all;">
                     <img id="moodtube-widget-cover" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7" style="width: 100%; height: 100%; border-radius: 50%; object-fit: cover;">
-                    <div id="moodtube-cover-hole" style="position: absolute; width: 14px; height: 14px; background: #222; border-radius: 50%; border: 1px solid ${ACCENT_COLOR}; transition: 0.3s all;"></div>
+                    <div id="moodtube-cover-hole" style="position: absolute; width: 14px; height: 14px; background: #222; border-radius: 50%; border: 1px solid var(--mt-accent); transition: 0.3s all;"></div>
                 </div>
                 
-                <div id="moodtube-title-container" style="display: flex; flex-direction: column; align-items: center; width: 100%; text-align: center; flex-shrink: 0;">
+                <div id="moodtube-title-container" style="display: flex; flex-direction: column; align-items: center; width: 100%; text-align: center; flex-shrink: 0; position: relative;">
                     <span id="moodtube-widget-title" style="font-weight: 600; font-size: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; width: 100%; margin-bottom: 2px;">No Track Selected</span>
-                    <span style="color: ${ACCENT_COLOR}; font-size: 12px; font-weight: bold;">MoodTube DJ</span>
+                    <span style="color: var(--mt-accent); font-size: 12px; font-weight: bold;">MoodTube DJ</span>
+                    <i class="fa-regular fa-heart moodtube-ctrl" id="moodtube-btn-favorite" style="position: absolute; right: 0; top: 0; cursor: pointer; color: var(--mt-accent); font-size: 16px; transition: 0.3s;" title="В избранное"></i>
+                </div>
+                
+                <div id="moodtube-progress-container" style="display: flex; align-items: center; width: 100%; flex-shrink: 0; gap: 5px; margin-top: -5px; font-size: 10px; color: #aaa;">
+                    <span id="moodtube-time-current">0:00</span>
+                    <input type="range" id="moodtube-progress-slider" min="0" max="100" value="0" class="moodtube-slider moodtube-ctrl" style="flex: 1; height: 3px;">
+                    <span id="moodtube-time-total">0:00</span>
                 </div>
                 
                 <div id="moodtube-controls-container" style="display: flex; gap: 15px; align-items: center; flex-shrink: 0;">
-                    <i class="fa-solid fa-list-ul moodtube-ctrl" id="moodtube-btn-queue" style="cursor:pointer; color: ${ACCENT_COLOR}; font-size: 16px; transition: 0.3s;" title="Queue"></i>
+                    <i class="fa-solid fa-list-ul moodtube-ctrl" id="moodtube-btn-queue" style="cursor:pointer; color: var(--mt-accent); font-size: 16px; transition: 0.3s;" title="Queue"></i>
                     <i class="fa-solid fa-backward-step moodtube-ctrl" id="moodtube-btn-prev" style="cursor:pointer; color: #fff; font-size: 18px; transition: 0.2s;" title="Previous"></i>
                     <i class="fa-solid fa-play moodtube-ctrl" id="moodtube-btn-playpause" style="cursor:pointer; font-size: 28px; color: #fff; transition: 0.2s; width: 28px; text-align: center;"></i>
                     <i class="fa-solid fa-forward-step moodtube-ctrl" id="moodtube-btn-next" style="cursor:pointer; color: #fff; font-size: 18px; transition: 0.2s;" title="Next"></i>
-                    <i class="fa-solid fa-wand-magic-sparkles moodtube-ctrl" id="moodtube-btn-ai" style="cursor:pointer; color: ${ACCENT_COLOR}; font-size: 18px; transition: 0.3s;" title="Auto-DJ (AI)"></i>
+                    <i class="fa-solid fa-wand-magic-sparkles moodtube-ctrl" id="moodtube-btn-ai" style="cursor:pointer; color: var(--mt-accent); font-size: 18px; transition: 0.3s;" title="Auto-DJ (AI)"></i>
                 </div>
 
                 <div id="moodtube-volume-container" style="display: flex; align-items: center; width: 90%; flex-shrink: 0;">
-                    <i class="fa-solid fa-volume-low" style="font-size: 12px; color: ${ACCENT_COLOR};"></i>
+                    <i class="fa-solid fa-volume-low" style="font-size: 12px; color: var(--mt-accent);"></i>
                     <input type="range" id="moodtube-vol-slider" min="0" max="100" value="50" class="moodtube-slider moodtube-ctrl">
-                    <i class="fa-solid fa-volume-high" style="font-size: 14px; color: ${ACCENT_COLOR};"></i>
+                    <i class="fa-solid fa-volume-high" style="font-size: 14px; color: var(--mt-accent);"></i>
                 </div>
             </div>
             
             <div id="moodtube-queue-container" style="display:none; position:absolute; top:0; left:0; width:100%; height:100%; background:${BG_COLOR}; z-index:4; padding:15px; box-sizing:border-box; flex-direction:column;">
                 <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px; flex-shrink:0;">
-                    <span style="font-weight:bold; font-size:14px; color:${ACCENT_COLOR};">Очередь треков</span>
-                    <i class="fa-solid fa-chevron-down moodtube-ctrl" id="moodtube-btn-close-queue" style="cursor:pointer; font-size:14px; color:#fff;"></i>
+                    <div style="display:flex; align-items:center; gap: 10px;">
+                        <span style="font-weight:bold; font-size:14px; color:var(--mt-accent);">Очередь треков</span>
+                        <i class="fa-solid fa-trash moodtube-ctrl" id="moodtube-btn-clear-queue" style="cursor:pointer; font-size:12px; color:var(--mt-accent);" title="Очистить очередь"></i>
+                    </div>
+                    <i class="fa-solid fa-chevron-down moodtube-ctrl" id="moodtube-btn-close-queue" style="cursor:pointer; font-size:14px; color:#fff;" title="Скрыть"></i>
                 </div>
                 <div id="moodtube-queue-list" style="flex:1; overflow-y:auto; padding-right:5px;">
                     <div style="font-size:12px; color:#888; text-align:center; padding:10px;">Очередь пуста</div>
@@ -1279,9 +1548,9 @@ async function initializeExtension() {
 .mt-flex-container {
     display: flex; flex-direction: column;
     width: 100%; max-width: 480px; max-height: 92dvh;
-    background-color: rgba(15, 20, 25, 0.88);
+    background-color: var(--mt-bg-primary);
     backdrop-filter: blur(45px);
-    border: 1px solid rgba(141, 183, 213, 0.3);
+    border: 1px solid var(--mt-border);
     border-radius: 16px;
     box-shadow: 0 30px 60px rgba(0,0,0,0.9) !important;
     overflow: hidden; box-sizing: border-box;
@@ -1289,9 +1558,9 @@ async function initializeExtension() {
 .mt-header {
     display: flex; justify-content: space-between; align-items: center;
     padding: 18px 22px;
-    background-color: rgba(15, 20, 25, 0.8);
+    background-color: var(--mt-bg-secondary);
     flex-shrink: 0;
-    border-bottom: 1px solid rgba(141, 183, 213, 0.2);
+    border-bottom: 1px solid var(--mt-border);
 }
 .mt-header h3 { margin: 0; font-size: 1.15em; font-weight: 600; color: #E5E7EB; letter-spacing: 0.5px; }
 .mt-close { cursor: pointer; font-size: 1.2em; color: #9CA3AF; transition: color 0.2s; }
@@ -1304,8 +1573,8 @@ async function initializeExtension() {
 .mt-content::-webkit-scrollbar-thumb { background-color: rgba(255,255,255,0.15); border-radius: 10px; }
 .mt-category {
     margin-bottom: 14px; border-radius: 12px; overflow: hidden;
-    background-color: rgba(30,30,36,0.5);
-    border: 1px solid rgba(141, 183, 213, 0.1);
+    background-color: var(--mt-bg-secondary);
+    border: 1px solid var(--mt-border);
 }
 .mt-category:last-child { margin-bottom: 0; }
 .mt-cat-title {
@@ -1314,7 +1583,7 @@ async function initializeExtension() {
     transition: background-color 0.2s;
 }
 .mt-cat-title:hover { background-color: rgba(255,255,255,0.04); }
-.mt-cat-title i:first-child { font-size: 1em; width: 20px; text-align: center; color: ${ACCENT_COLOR} !important; }
+.mt-cat-title i:first-child { font-size: 1em; width: 20px; text-align: center; color: var(--mt-accent) !important; }
 .mt-cat-title h4 {
     margin: 0; font-size: 0.88em; font-weight: 500;
     text-transform: uppercase; letter-spacing: 1px; flex-grow: 1; color: #D1D5DB;
@@ -1335,29 +1604,29 @@ async function initializeExtension() {
 
 .mt-tag:active { transform: scale(0.96); }
 /* Genre tags */
-.mt-genre-tag:hover { border-color: ${ACCENT_COLOR}; color: #fff; background-color: rgba(141, 183, 213, 0.15); }
-.mt-genre-tag.active { background-color: ${ACCENT_COLOR}; color: #111827; border-color: ${ACCENT_COLOR}; font-weight: 600; box-shadow: 0 0 10px rgba(141, 183, 213, 0.3); }
+.mt-genre-tag:hover { border-color: var(--mt-accent); color: #fff; background-color: rgba(255, 255, 255, 0.1); }
+.mt-genre-tag.active { background-color: var(--mt-accent); color: #111827; border-color: var(--mt-accent); font-weight: 600; box-shadow: 0 0 10px var(--mt-border); }
 /* Mood tags */
-.mt-mood-tag:hover { border-color: ${ACCENT_COLOR}; color: #fff; background-color: rgba(141, 183, 213, 0.15); }
-.mt-mood-tag.active { background-color: ${ACCENT_COLOR}; color: #111827; border-color: ${ACCENT_COLOR}; font-weight: 600; box-shadow: 0 0 10px rgba(141, 183, 213, 0.3); }
+.mt-mood-tag:hover { border-color: var(--mt-accent); color: #fff; background-color: rgba(255, 255, 255, 0.1); }
+.mt-mood-tag.active { background-color: var(--mt-accent); color: #111827; border-color: var(--mt-accent); font-weight: 600; box-shadow: 0 0 10px var(--mt-border); }
 /* Scenario tags */
-.mt-scenario-tag:hover { border-color: ${ACCENT_COLOR}; color: #fff; background-color: rgba(141, 183, 213, 0.15); }
-.mt-scenario-tag.active { background-color: ${ACCENT_COLOR}; color: #111827; border-color: ${ACCENT_COLOR}; font-weight: 600; box-shadow: 0 0 10px rgba(141, 183, 213, 0.3); }
+.mt-scenario-tag:hover { border-color: var(--mt-accent); color: #fff; background-color: rgba(255, 255, 255, 0.1); }
+.mt-scenario-tag.active { background-color: var(--mt-accent); color: #111827; border-color: var(--mt-accent); font-weight: 600; box-shadow: 0 0 10px var(--mt-border); }
 /* API section */
 .mt-input-field {
-    background: rgba(20,20,25,0.6); border: 1px solid rgba(255,255,255,0.15);
+    background: var(--mt-bg-input); border: 1px solid var(--mt-border);
     border-radius: 8px; color: #E5E7EB; padding: 10px 12px;
     font-size: 0.85em; outline: none; transition: 0.2s;
     width: 100%; box-sizing: border-box; font-family: inherit;
 }
-.mt-input-field:focus { border-color: ${ACCENT_COLOR}; background: rgba(30,30,36,0.8); }
+.mt-input-field:focus { border-color: var(--mt-accent); background: var(--mt-bg-secondary); }
 .mt-input-field::placeholder { color: #6B7280; }
 .mt-label { display: block; font-size: 0.82em; color: #9CA3AF; margin-bottom: 6px; margin-top: 10px; }
 .mt-label:first-child { margin-top: 0; }
 .mt-footer {
     padding: 14px 22px;
-    background-color: rgba(15, 20, 25, 0.85);
-    border-top: 1px solid rgba(141, 183, 213, 0.1);
+    background-color: var(--mt-bg-primary);
+    border-top: 1px solid var(--mt-border);
     flex-shrink: 0;
 }
 .mt-footer-tags {
@@ -1370,12 +1639,12 @@ async function initializeExtension() {
     transition: opacity 0.2s, transform 0.1s;
 }
 .mt-summary-tag:hover { opacity: 0.7; transform: scale(0.95); }
-.mt-sum-genre { background-color: ${ACCENT_COLOR}; color: #111827; }
-.mt-sum-mood { background-color: ${ACCENT_COLOR}; color: #111827; }
-.mt-sum-scenario { background-color: ${ACCENT_COLOR}; color: #111827; }
+.mt-sum-genre { background-color: var(--mt-accent); color: #111827; }
+.mt-sum-mood { background-color: var(--mt-accent); color: #111827; }
+.mt-sum-scenario { background-color: var(--mt-accent); color: #111827; }
 .mt-btn-save {
     width: 100%; padding: 12px; border: none; border-radius: 8px;
-    background: ${ACCENT_COLOR}; color: #000; font-weight: 600;
+    background: var(--mt-accent); color: #000; font-weight: 600;
     font-size: 0.95em; cursor: pointer; transition: 0.2s; letter-spacing: 0.5px;
 }
 .mt-btn-save:hover { filter: brightness(1.15); }
@@ -1385,12 +1654,12 @@ async function initializeExtension() {
     border: 1px solid rgba(255,255,255,0.15); border-radius: 8px;
     cursor: pointer; font-weight: 500; font-size: 0.85em; transition: 0.2s;
 }
-.mt-btn-test:hover { background: rgba(255,255,255,0.12); border-color: ${ACCENT_COLOR}; }
+.mt-btn-test:hover { background: rgba(255,255,255,0.12); border-color: var(--mt-accent); }
 .mt-checkbox-row {
     display: flex; align-items: center; gap: 8px; cursor: pointer;
     padding: 4px 0; font-size: 0.9em; color: #D1D5DB;
 }
-.mt-checkbox-row input[type="checkbox"] { width: 16px; height: 16px; cursor: pointer; accent-color: ${ACCENT_COLOR}; }
+.mt-checkbox-row input[type="checkbox"] { width: 16px; height: 16px; cursor: pointer; accent-color: var(--mt-accent); }
 @media (max-width: 600px) {
     .mt-flex-container { max-width: 100% !important; max-height: 100dvh !important; border-radius: 0 !important; border: none !important; }
     .mt-flex-center { padding: 0 !important; }
@@ -1402,18 +1671,36 @@ async function initializeExtension() {
             <div class="mt-flex-center">
                 <div class="mt-flex-container">
                     <div class="mt-header">
-                        <h3><i class="fa-solid fa-sliders" style="margin-right:8px; color:${ACCENT_COLOR};"></i>MoodTube</h3>
+                        <h3><i class="fa-solid fa-sliders" style="margin-right:8px; color:var(--mt-accent);"></i>MoodTube</h3>
                         <div style="display:flex; align-items:center; gap:15px;">
-                            <div style="display:flex; align-items:center; gap:5px;" title="Количество треков для генерации">
-                                <div id="moodtube-btn-bulk-ai" class="moodtube-ctrl" style="display:flex; align-items:center; cursor:pointer; color: ${ACCENT_COLOR}; transition: 0.3s;" title="Сгенерировать плейлист">
-                                    <div style="width: 22px; height: 22px; background-color: currentColor; -webkit-mask: url(https://img.icons8.com/ios-filled/50/cd-collection.png) no-repeat center / contain; mask: url(https://img.icons8.com/ios-filled/50/cd-collection.png) no-repeat center / contain;"></div>
-                                </div>
-                                <input type="number" id="moodtube-bulk-count" value="10" min="1" max="30" style="width: 36px; background: rgba(0,0,0,0.4); border: 1px solid rgba(141, 183, 213, 0.4); color: #fff; border-radius: 4px; text-align: center; font-size: 12px; outline: none;" class="moodtube-ctrl">
-                            </div>
                             <span class="mt-close" id="mt-close-settings">&#10006;</span>
                         </div>
                     </div>
                     <div class="mt-content">
+
+                        <!-- ИНТЕРФЕЙС -->
+                        <div class="mt-category">
+                            <div class="mt-cat-title" data-mt-cat="ui">
+                                <i class="fa-solid fa-desktop"></i>
+                                <h4>Интерфейс</h4>
+                                <i class="fa-solid fa-chevron-down mt-chevron"></i>
+                            </div>
+                            <div class="mt-cat-content" id="mt-cat-ui">
+                                <span class="mt-label" style="margin-top:0;">Тема оформления</span>
+                                <select id="moodtube-setting-theme" class="mt-input-field">
+                                    <option value="blue">Blue (Default)</option>
+                                    <option value="grey">Grey</option>
+                                    <option value="rose">Rose</option>
+                                    <option value="emerald">Emerald</option>
+                                    <option value="auto">Tavern Auto</option>
+                                </select>
+                                <hr style="border:0; border-top:1px solid rgba(255,255,255,0.05); margin:15px 0;">
+                                <label class="mt-checkbox-row">
+                                    <input type="checkbox" id="moodtube-setting-fab">
+                                    <span>Включить плавающую кнопку</span>
+                                </label>
+                            </div>
+                        </div>
 
                         <!-- API -->
                         <div class="mt-category">
@@ -1423,17 +1710,17 @@ async function initializeExtension() {
                                 <i class="fa-solid fa-chevron-down mt-chevron"></i>
                             </div>
                             <div class="mt-cat-content" id="mt-cat-api">
-                                <label class="mt-checkbox-row">
-                                    <input type="checkbox" id="moodtube-setting-enable">
-                                    <span>Использовать внешний ИИ API</span>
-                                </label>
-                                <span class="mt-label">OpenAI-совместимый URL (автоматически добавим /chat/completions)</span>
-                                <input type="text" id="moodtube-setting-url" class="mt-input-field" placeholder="Например: http://127.0.0.1:5000/v1">
-                                <span class="mt-label">API Key</span>
-                                <input type="password" id="moodtube-setting-key" class="mt-input-field">
-                                <span class="mt-label">Модель</span>
-                                <input type="text" id="moodtube-setting-model" class="mt-input-field">
-                                <button id="moodtube-btn-test-settings" class="mt-btn-test">Проверить соединение</button>
+                                <span class="mt-label" style="margin-top:0;">Количество треков для генерации за раз</span>
+                                <input type="number" id="moodtube-bulk-count" value="10" min="1" max="30" class="mt-input-field" style="width: 100px;">
+                                
+                                <hr style="border:0; border-top:1px solid rgba(255,255,255,0.05); margin:15px 0;">
+
+                                <span class="mt-label">Профиль подключения</span>
+                                <div style="display: flex; gap: 8px;">
+                                    <select id="moodtube-api-profile-select" class="mt-input-field" style="flex: 1; padding: 8px;"></select>
+                                    <button id="moodtube-btn-sync-profiles" class="mt-btn-test" style="margin-top: 0; width: auto; padding: 8px 12px;" title="Синхронизировать"><i class="fa-solid fa-arrows-rotate"></i></button>
+                                </div>
+                                <button id="moodtube-btn-test-profile" class="mt-btn-test" style="margin-top: 10px;">Проверить соединение</button>
                             </div>
                         </div>
 
@@ -1539,7 +1826,7 @@ async function initializeExtension() {
                             </div>
                         </div>
 
-                        <!-- Р‘РђРќ-Р›РРЎРў -->
+                        <!-- БАН-ЛИСТ -->
                         <div class="mt-category">
                             <div class="mt-cat-title" data-mt-cat="banlist">
                                 <i class="fa-solid fa-ban"></i>
@@ -1553,8 +1840,25 @@ async function initializeExtension() {
                                 <input type="text" id="moodtube-setting-banlist" class="mt-input-field">
                             </div>
                         </div>
+                        
+                        <!-- ИЗБРАННОЕ -->
+                        <div class="mt-category">
+                            <div class="mt-cat-title" data-mt-cat="favorites">
+                                <i class="fa-solid fa-heart"></i>
+                                <h4>Избранные треки</h4>
+                                <i class="fa-solid fa-chevron-down mt-chevron"></i>
+                            </div>
+                            <div class="mt-cat-content" id="mt-cat-favorites">
+                                <label class="mt-checkbox-row">
+                                    <input type="checkbox" id="moodtube-setting-favorites-context">
+                                    <span>Отправлять список избранного в контекст ИИ</span>
+                                </label>
+                                <span class="mt-label" style="margin-top:10px;">Список ваших любимых треков</span>
+                                <textarea id="moodtube-setting-favorites-list" class="mt-input-field" style="resize:vertical; min-height:80px;"></textarea>
+                            </div>
+                        </div>
 
-                        <!-- РљРђРЎРўРћРњ / РЎР’РћР РўР•Р“Р -->
+                        <!-- КАСТОМ / СВОИ ТЕГИ -->
                         <div class="mt-category">
                             <div class="mt-cat-title" data-mt-cat="custom">
                                 <i class="fa-solid fa-pen-nib"></i>
@@ -1569,7 +1873,13 @@ async function initializeExtension() {
                                 
                                 <hr style="border:0; border-top:1px solid rgba(255,255,255,0.05); margin:15px 0;">
                                 
-                                <span class="mt-label" style="margin-top:0; color:#ccc;">Кастомный промпт (заменяет стандартный)</span>
+                                <span class="mt-label" style="margin-top:0; color:#ccc;">Жесткое правило (Hard Rule) для промпта</span>
+                                <span class="mt-label" style="margin-top:4px; font-size:0.78em;">Команда, заставляющая ИИ включить то, что вы написали в чате</span>
+                                <input type="text" id="moodtube-setting-hard-rule" class="mt-input-field" placeholder='[OOC: Start the music: {"Title": "_", "Artist": "_"}]'>
+
+                                <hr style="border:0; border-top:1px solid rgba(255,255,255,0.05); margin:15px 0;">
+
+                                <span class="mt-label" style="margin-top:0; color:#ccc;">Кастомный промпт (заменяет стандартный полностью)</span>
                                 <span class="mt-label" style="margin-top:4px; font-size:0.78em;">Макросы: <b>{{snippet}}</b> — история чата, <b>{{history}}</b> — проигранные треки</span>
                                 <textarea id="moodtube-setting-custom" class="mt-input-field" style="resize:vertical; min-height:100px; margin-top:8px;"></textarea>
                             </div>
@@ -1595,6 +1905,195 @@ async function initializeExtension() {
             $('#mt-scenario-custom, #mt-scenario-custom-2').val($(this).val());
         });
 
+        // --- FAB (Плавающая кнопка) ---
+        function getFabPos() {
+            let sPos = { left: window.innerWidth - 80, top: window.innerHeight - 150 };
+            try { const st = localStorage.getItem('moodtube_fab_pos'); if (st) sPos = JSON.parse(st); } catch(e){}
+            return sPos;
+        }
+
+        function restoreFabStandalone($fab) {
+            const sPos = getFabPos();
+            $fab.css({
+                position: 'fixed', left: Math.max(0, Math.min(sPos.left, window.innerWidth - 60)) + 'px', top: Math.max(0, Math.min(sPos.top, window.innerHeight - 60)) + 'px', right: 'auto', bottom: 'auto',
+                zIndex: '9999999', width: '48px', height: '48px',
+                border: '2px solid var(--mt-accent)', backgroundColor: 'var(--mt-bg-secondary)', color: 'var(--mt-accent)',
+                boxShadow: '0 4px 15px rgba(0,0,0,0.5)', cursor: 'grab'
+            });
+            $fab.find('#moodtube-fab-icon').css('color', 'var(--mt-accent)');
+        }
+
+        function createFab() {
+            if ($('#moodtube-fab').length === 0) {
+                $(`
+                <div id="moodtube-fab" class="moodtube-ctrl" style="
+                    position: fixed; width: 48px; height: 48px;
+                    background: var(--mt-bg-secondary); border: 2px solid var(--mt-accent); border-radius: 50%;
+                    display: flex; justify-content: center; align-items: center;
+                    box-shadow: 0 4px 15px rgba(0,0,0,0.5); cursor: grab; z-index: 9999999;
+                    color: var(--mt-accent); font-size: 18px; transition: background 0.2s, border 0.2s;
+                    touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
+                ">
+                    <i class="fa-solid fa-play" id="moodtube-fab-icon" style="margin-left: 3px; pointer-events: none; position: relative; z-index: 2;"></i>
+                </div>
+                `).appendTo('body');
+                
+                restoreFabStandalone($('#moodtube-fab'));
+
+                const el = document.getElementById('moodtube-fab');
+                let isDragging = false;
+                let startX, startY, initialLeft, initialTop;
+                let currentDx = 0, currentDy = 0;
+                let rafId = null;
+                let fabPressTimer = null;
+                let fabLongPressed = false;
+                let wasDragged = false;
+
+                const dragStart = (e) => {
+                    if (e.type === 'mousedown' && e.button !== 0) return;
+                    if (el.closest('.DA-floating-window')) return; // Не таскаем кнопку отдельно, если она в DreamAlbum
+                    isDragging = false;
+                    wasDragged = false;
+                    const event = e.type.startsWith('touch') ? e.touches[0] : e;
+                    startX = event.clientX; startY = event.clientY;
+                    initialLeft = el.offsetLeft; initialTop = el.offsetTop;
+                    currentDx = 0; currentDy = 0;
+                    el.style.cursor = 'grabbing';
+                };
+
+                const dragMove = (e) => {
+                    if (startX === undefined) return;
+                    const event = e.type.startsWith('touch') ? e.touches[0] : e;
+                    const dx = event.clientX - startX;
+                    const dy = event.clientY - startY;
+                    
+                    if (Math.abs(dx) > 5 || Math.abs(dy) > 5) {
+                        isDragging = true;
+                        wasDragged = true;
+                        clearTimeout(fabPressTimer);
+                    }
+                    
+                    if (isDragging) {
+                        if (e.cancelable) e.preventDefault();
+                        let newLeft = Math.max(0, Math.min(initialLeft + dx, window.innerWidth - el.offsetWidth));
+                        let newTop = Math.max(0, Math.min(initialTop + dy, window.innerHeight - el.offsetHeight));
+                        currentDx = newLeft - initialLeft;
+                        currentDy = newTop - initialTop;
+                        
+                        if (rafId) cancelAnimationFrame(rafId);
+                        rafId = requestAnimationFrame(() => {
+                            el.style.transform = `translate3d(${currentDx}px, ${currentDy}px, 0)`;
+                            document.body.classList.add('moodtube-no-select');
+                        });
+                    }
+                };
+
+                const dragEnd = (e) => {
+                    if (startX === undefined) return;
+                    startX = undefined;
+                    if (rafId) cancelAnimationFrame(rafId);
+                    el.style.cursor = 'grab';
+                    document.body.classList.remove('moodtube-no-select');
+                    
+                    if (isDragging) {
+                        el.style.transform = 'none';
+                        el.style.left = (initialLeft + currentDx) + 'px';
+                        el.style.top = (initialTop + currentDy) + 'px';
+                        localStorage.setItem('moodtube_fab_pos', JSON.stringify({ left: initialLeft + currentDx, top: initialTop + currentDy }));
+                        isDragging = false;
+                        setTimeout(() => { wasDragged = false; }, 300);
+                    }
+                };
+
+                el.addEventListener('mousedown', dragStart, { passive: false });
+                el.addEventListener('touchstart', dragStart, { passive: false });
+                document.addEventListener('mousemove', dragMove, { passive: false });
+                document.addEventListener('touchmove', dragMove, { passive: false });
+                document.addEventListener('mouseup', dragEnd);
+                document.addEventListener('touchend', dragEnd);
+                document.addEventListener('touchcancel', dragEnd);
+                el.addEventListener('contextmenu', (e) => {
+                    e.preventDefault();
+                });
+                
+                el.addEventListener('pointerdown', (e) => {
+                    fabLongPressed = false;
+                    fabPressTimer = setTimeout(() => {
+                        if (!isDragging && !wasDragged) {
+                            fabLongPressed = true;
+                            isPlayerFolded = !isPlayerFolded;
+                            updatePlayerVisibility();
+                        }
+                    }, 750);
+                });
+                el.addEventListener('pointerup', () => clearTimeout(fabPressTimer));
+                el.addEventListener('pointerleave', () => clearTimeout(fabPressTimer));
+                
+                el.addEventListener('click', (e) => {
+                    clearTimeout(fabPressTimer);
+                    if (isDragging || wasDragged || fabLongPressed) { 
+                        e.preventDefault(); e.stopPropagation(); 
+                        fabLongPressed = false;
+                        wasDragged = false;
+                    }
+                    else { $('#moodtube-btn-playpause').trigger('click'); }
+                }, true);
+
+                const isPaused = $('#moodtube-btn-playpause').hasClass('fa-pause');
+                $('#moodtube-fab-icon').attr('class', isPaused ? 'fa-solid fa-pause' : 'fa-solid fa-play').css('margin-left', isPaused ? '0' : '3px');
+            }
+            return $('#moodtube-fab');
+        }
+
+        // Авто-стыковка с DreamAlbum и авто-восстановление
+        setInterval(() => {
+            const fabEnabled = localStorage.getItem('moodtube_fab_enable') !== 'false';
+            const $fab = createFab(); // Гарантируем, что элемент существует в DOM
+            const $daContainer = $('#DA-floating-container');
+            
+            let isDaLinked = false;
+            try {
+                const stContext = typeof SillyTavern !== 'undefined' ? SillyTavern.getContext() : (typeof getContext !== 'undefined' ? getContext() : null);
+                isDaLinked = stContext?.extensionSettings?.DreamAlbum?.moodtube_link === true;
+            } catch (e) {}
+            
+            if ($daContainer.length > 0 && isDaLinked) {
+                if (!$fab.parent().hasClass('DA-floating-window')) {
+                    $('#DA-moodtube-placeholder').hide();
+                    $fab.css({
+                        position: 'relative', left: 'auto', top: 'auto', right: 'auto', bottom: 'auto',
+                        zIndex: 'auto', width: '48px', height: '48px',
+                        border: '2px solid ' + ACCENT_COLOR, backgroundColor: 'rgba(20, 15, 20, 0.82)', color: ACCENT_COLOR,
+                        boxShadow: '0 4px 8px rgba(0,0,0,0.3)', cursor: 'pointer'
+                    });
+                    $fab.find('#moodtube-fab-icon').css('color', ACCENT_COLOR);
+                    $daContainer.find('.DA-floating-window').append($fab);
+                }
+            } else {
+                if (!$fab.parent().is('body')) {
+                    restoreFabStandalone($fab);
+                    $('body').append($fab);
+                }
+            }
+
+            if (fabEnabled) $fab.show(); else $fab.hide();
+        }, 200);
+        
+        $('<style>.moodtube-no-select { user-select: none !important; }</style>').appendTo('head');
+
+        // Синхронизация иконки FAB с главной кнопкой
+        const observerBtn = new MutationObserver((mutations) => {
+            for(let mutation of mutations) {
+                if(mutation.attributeName === 'class') {
+                    const isPaused = $('#moodtube-btn-playpause').hasClass('fa-pause');
+                    $('#moodtube-fab-icon').attr('class', isPaused ? 'fa-solid fa-pause' : 'fa-solid fa-play');
+                    // Убираем марджин для ровного центрирования иконки паузы
+                    $('#moodtube-fab-icon').css('margin-left', isPaused ? '0' : '3px');
+                    if (isPaused) $('#moodtube-fab').addClass('mt-playing'); else $('#moodtube-fab').removeClass('mt-playing');
+                }
+            }
+        });
+        observerBtn.observe($('#moodtube-btn-playpause')[0], { attributes: true });
 
 
         $('#moodtube-btn-playpause').on('click', () => {
@@ -1610,6 +2109,73 @@ async function initializeExtension() {
         $('#moodtube-btn-next').on('click', playNextInQueue);
         $('#moodtube-btn-prev').on('click', playPrevInQueue);
         
+        $('#moodtube-btn-favorite').on('click', () => {
+            if (currentQueueIndex >= 0 && currentQueueIndex < trackQueue.length) {
+                const track = trackQueue[currentQueueIndex];
+                const trackName = `${track.title} ${track.artist || track.Artist || ''}`.trim();
+                let favList = getMtSetting('favorites');
+                
+                if (!favList.includes(trackName)) {
+                    favList = favList ? favList + ', ' + trackName : trackName;
+                    saveMtSetting('favorites', favList);
+                    $('#moodtube-setting-favorites-list').val(favList);
+                    
+                    $('#moodtube-btn-favorite').removeClass('fa-regular').addClass('fa-solid');
+                    toastr.success(`Трек добавлен в Избранное`);
+                } else {
+                    toastr.info(`Трек уже в Избранном`);
+                }
+            } else {
+                toastr.warning(`Нет активного трека`);
+            }
+        });
+
+        // Функция форматирования времени
+        const formatTime = (time) => {
+            if (isNaN(time)) return "0:00";
+            const min = Math.floor(time / 60);
+            const sec = Math.floor(time % 60);
+            return `${min}:${sec < 10 ? '0' : ''}${sec}`;
+        };
+
+        // Обновление прогресс-бара
+        setInterval(() => {
+            if (!isCurrentlyPlaying) return;
+            
+            let current = 0;
+            let total = 0;
+            
+            if (isUsingAudioFallback && audioFallback) {
+                current = audioFallback.currentTime || 0;
+                total = audioFallback.duration || 0;
+            } else if (ytPlayer && typeof ytPlayer.getCurrentTime === 'function' && typeof ytPlayer.getDuration === 'function') {
+                current = ytPlayer.getCurrentTime() || 0;
+                total = ytPlayer.getDuration() || 0;
+            }
+            
+            if (total > 0) {
+                $('#moodtube-time-current').text(formatTime(current));
+                $('#moodtube-time-total').text(formatTime(total));
+                if (!$('#moodtube-progress-slider').is(':active')) {
+                    $('#moodtube-progress-slider').val((current / total) * 100);
+                }
+            }
+        }, 1000);
+
+        // Перемотка трека
+        $('#moodtube-progress-slider').on('input change', function() {
+            const val = $(this).val();
+            let total = 0;
+            
+            if (isUsingAudioFallback && audioFallback) {
+                total = audioFallback.duration || 0;
+                if (total > 0) audioFallback.currentTime = (val / 100) * total;
+            } else if (ytPlayer && typeof ytPlayer.getDuration === 'function' && typeof ytPlayer.seekTo === 'function') {
+                total = ytPlayer.getDuration() || 0;
+                if (total > 0) ytPlayer.seekTo((val / 100) * total, true);
+            }
+        });
+        
         $('#moodtube-btn-queue').on('click', () => {
             $('#moodtube-inner-content').hide();
             $('#moodtube-btn-close').hide();
@@ -1621,6 +2187,18 @@ async function initializeExtension() {
             $('#moodtube-queue-container').hide();
             $('#moodtube-inner-content').css('display', '');
             $('#moodtube-btn-close').show();
+        });
+
+        $('#moodtube-btn-clear-queue').on('click', () => {
+            trackQueue = [];
+            currentQueueIndex = -1;
+            if (ytPlayer && typeof ytPlayer.stopVideo === 'function') ytPlayer.stopVideo();
+            if (audioFallback) { audioFallback.pause(); isUsingAudioFallback = false; }
+            isCurrentlyPlaying = false;
+            $('#moodtube-btn-playpause').attr('class', 'fa-solid fa-play moodtube-ctrl');
+            $('#moodtube-widget-title').text('Очередь пуста');
+            $('#moodtube-widget-cover').attr('src', 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7');
+            updateQueueUI();
         });
         
         // --- Settings modal: accordion toggle ---
@@ -1663,22 +2241,136 @@ async function initializeExtension() {
             mtUpdateSummary();
         });
 
+        // --- API Profiles ---
+        let activeProfileName = '';
+        
+        function loadProfiles() {
+            const stContext = typeof SillyTavern !== 'undefined' ? SillyTavern.getContext() : getContext();
+            const profiles = stContext?.extensionSettings?.connectionManager?.profiles || [];
+            
+            activeProfileName = localStorage.getItem('moodtube_active_profile_name') || '';
+            
+            const $sel = $('#moodtube-api-profile-select');
+            $sel.empty();
+            
+            // Default option: use SillyTavern's main API via generateRaw
+            $sel.append($('<option>', { value: '', text: 'Главный API Таверны' }));
+            
+            profiles.forEach(p => {
+                $sel.append($('<option>', { value: p.name, text: p.name }));
+            });
+            
+            if (activeProfileName && profiles.find(p => p.name === activeProfileName)) {
+                $sel.val(activeProfileName);
+            } else if (!activeProfileName) {
+                $sel.val('');
+            } else {
+                // Saved profile no longer exists, reset to tavern default
+                activeProfileName = '';
+                $sel.val('');
+            }
+        }
+
+        $('#moodtube-api-profile-select').on('change', function() {
+            activeProfileName = $(this).val();
+            localStorage.setItem('moodtube_active_profile_name', activeProfileName);
+        });
+
+        $('#moodtube-btn-sync-profiles').on('click', () => {
+            loadProfiles();
+            toastr.success('Профили API синхронизированы!');
+        });
+
+        $('#moodtube-btn-test-profile').on('click', async () => {
+            const stContext = typeof SillyTavern !== 'undefined' ? SillyTavern.getContext() : getContext();
+            
+            const oldText = $('#moodtube-btn-test-profile').text();
+            $('#moodtube-btn-test-profile').text('⏳').prop('disabled', true);
+            
+            try {
+                if (!activeProfileName) {
+                    // Test tavern's main API via generateRaw
+                    console.log(`${LOG_PREFIX} Testing Tavern main API via generateRaw...`);
+                    const result = await generateRaw({ prompt: 'respond with "ok"', systemPrompt: '' });
+                    if (result) {
+                        toastr.success("Соединение с главным API Таверны успешно!");
+                    } else {
+                        toastr.error("Главный API Таверны не ответил.");
+                    }
+                } else {
+                    const profiles = stContext?.extensionSettings?.connectionManager?.profiles || [];
+                    const profile = profiles.find(p => p.name === activeProfileName);
+                    if (!profile) return toastr.warning(`Профиль '${activeProfileName}' не найден.`);
+
+                    const cc_source = profile.api || 'openai';
+                    let generate_data = {
+                        'messages': [{ role: 'user', content: 'respond with "ok"' }],
+                        'model': profile.model,
+                        'temperature': 0.3,
+                        'stream': false,
+                        'chat_completion_source': cc_source,
+                    };
+                    
+                    const profileApiValue = profile['api-url'];
+                    if (cc_source === 'custom' && profileApiValue) {
+                        generate_data['custom_url'] = profileApiValue.trim().replace(/\/+$/, '');
+                        const ccSettings = stContext.chatCompletionSettings || {};
+                        if (ccSettings.custom_prompt_post_processing) generate_data['custom_prompt_post_processing'] = ccSettings.custom_prompt_post_processing;
+                        if (ccSettings.custom_include_body) generate_data['custom_include_body'] = ccSettings.custom_include_body;
+                        if (ccSettings.custom_exclude_body) generate_data['custom_exclude_body'] = ccSettings.custom_exclude_body;
+                        if (ccSettings.custom_include_headers) generate_data['custom_include_headers'] = ccSettings.custom_include_headers;
+                    } else if (cc_source === 'vertexai' && profileApiValue) {
+                        generate_data['vertexai_region'] = profileApiValue;
+                        const ccSettings = stContext.chatCompletionSettings || {};
+                        if (ccSettings.vertexai_auth_mode) generate_data['vertexai_auth_mode'] = ccSettings.vertexai_auth_mode;
+                        if (ccSettings.vertexai_express_project_id) generate_data['vertexai_express_project_id'] = ccSettings.vertexai_express_project_id;
+                    } else if (cc_source === 'zai' && profileApiValue) {
+                        generate_data['zai_endpoint'] = profileApiValue;
+                    }
+
+                    const headers = (typeof stContext.getRequestHeaders === 'function') ? stContext.getRequestHeaders() : {'Content-Type': 'application/json'};
+                    const res = await fetch('/api/backends/chat-completions/generate', {
+                        method: 'POST',
+                        headers: headers,
+                        body: JSON.stringify(generate_data)
+                    });
+                    
+                    if (res.ok) {
+                        toastr.success(`Соединение с профилем '${activeProfileName}' успешно!`);
+                    } else {
+                        const err = await res.json().catch(() => ({error: {message: "Unknown error"}}));
+                        toastr.error(`Ошибка: ${res.status} - ${err.error?.message || 'Check console'}`);
+                    }
+                }
+            } catch (e) {
+                console.error(e);
+                toastr.error(`Ошибка сети: ${e.message}`);
+            } finally {
+                $('#moodtube-btn-test-profile').text(oldText).prop('disabled', false);
+            }
+        });
+
         // --- Open settings ---
         $('#moodtube-btn-settings').on('click', () => {
             $('#mt-settings-modal').css('display', 'block');
+            
+            loadProfiles();
 
             // Load plain inputs
-            $('#moodtube-setting-enable').prop('checked', localStorage.getItem('moodtube_ai_enable') === 'true');
-            $('#moodtube-setting-url').val(localStorage.getItem('moodtube_ai_url') || '');
-            $('#moodtube-setting-key').val(localStorage.getItem('moodtube_ai_key') || '');
-            $('#moodtube-setting-model').val(localStorage.getItem('moodtube_ai_model') || '');
-            $('#moodtube-setting-banned-songs').val(localStorage.getItem('moodtube_ai_banned_songs') || '');
-            $('#moodtube-setting-banlist').val(localStorage.getItem('moodtube_ai_banlist') || '');
-            $('#moodtube-setting-custom').val(localStorage.getItem('moodtube_ai_custom') || '');
+            $('#moodtube-setting-theme').val(localStorage.getItem('moodtube_theme') || 'blue');
+            $('#moodtube-bulk-count').val(localStorage.getItem('moodtube_ai_bulk_count') || '10');
+            $('#moodtube-setting-fab').prop('checked', localStorage.getItem('moodtube_fab_enable') !== 'false');
+            
+            $('#moodtube-setting-banned-songs').val(getMtSetting('banned_songs'));
+            $('#moodtube-setting-banlist').val(getMtSetting('banlist'));
+            $('#moodtube-setting-favorites-list').val(getMtSetting('favorites'));
+            $('#moodtube-setting-favorites-context').prop('checked', getMtSetting('favorites_context') === 'true');
+            $('#moodtube-setting-hard-rule').val(getMtSetting('hard_rule'));
+            $('#moodtube-setting-custom').val(getMtSetting('custom'));
 
             // Restore active tags from localStorage
-            const savedGenres = (localStorage.getItem('moodtube_ai_genre') || '').split(',').map(s => s.trim()).filter(Boolean);
-            const savedScenario = (localStorage.getItem('moodtube_ai_scenario') || '').split(',').map(s => s.trim()).filter(Boolean);
+            const savedGenres = getMtSetting('genre').split(',').map(s => s.trim()).filter(Boolean);
+            const savedScenario = getMtSetting('scenario').split(',').map(s => s.trim()).filter(Boolean);
 
             // Clear all tag states first
             $('.mt-tag').removeClass('active');
@@ -1724,17 +2416,25 @@ async function initializeExtension() {
 
         // --- Save settings ---
         $('#moodtube-btn-save-settings').on('click', () => {
-            localStorage.setItem('moodtube_ai_enable', $('#moodtube-setting-enable').is(':checked') ? 'true' : 'false');
-            localStorage.setItem('moodtube_ai_url', $('#moodtube-setting-url').val().trim());
-            localStorage.setItem('moodtube_ai_key', $('#moodtube-setting-key').val().trim());
-            localStorage.setItem('moodtube_ai_model', $('#moodtube-setting-model').val().trim());
+            activeProfileName = $('#moodtube-api-profile-select').val();
+            localStorage.setItem('moodtube_active_profile_name', activeProfileName);
+            
+            const theme = $('#moodtube-setting-theme').val();
+            localStorage.setItem('moodtube_theme', theme);
+            applyTheme(theme);
+            
+            const fabEnabled = $('#moodtube-setting-fab').is(':checked');
+            localStorage.setItem('moodtube_fab_enable', fabEnabled ? 'true' : 'false');
+            if (fabEnabled) $('#moodtube-fab').show(); else $('#moodtube-fab').hide();
+            
+            localStorage.setItem('moodtube_ai_bulk_count', $('#moodtube-bulk-count').val());
 
             // Collect genres: active tags + custom input
             const genreTags = [];
             $('#mt-cat-genre .mt-genre-tag.active').each(function() { genreTags.push($(this).text()); });
             const genreCustom = $('#mt-genre-custom').val().trim();
             if (genreCustom) genreTags.push(...genreCustom.split(',').map(s => s.trim()).filter(Boolean));
-            localStorage.setItem('moodtube_ai_genre', genreTags.join(', '));
+            saveMtSetting('genre', genreTags.join(', '));
 
             // Collect scenario: mood tags + scenario tags + custom input
             const scenarioTags = [];
@@ -1742,68 +2442,45 @@ async function initializeExtension() {
             $('#mt-cat-scenario .mt-scenario-tag.active').each(function() { scenarioTags.push($(this).text()); });
             const scenarioCustom = $('#mt-scenario-custom').val().trim();
             if (scenarioCustom) scenarioTags.push(...scenarioCustom.split(',').map(s => s.trim()).filter(Boolean));
-            localStorage.setItem('moodtube_ai_scenario', scenarioTags.join(', '));
+            saveMtSetting('scenario', scenarioTags.join(', '));
 
-            localStorage.setItem('moodtube_ai_banlist', $('#moodtube-setting-banlist').val().trim());
-            localStorage.setItem('moodtube_ai_banned_songs', $('#moodtube-setting-banned-songs').val().trim());
-            localStorage.setItem('moodtube_ai_custom', $('#moodtube-setting-custom').val().trim());
+            saveMtSetting('banlist', $('#moodtube-setting-banlist').val().trim());
+            saveMtSetting('banned_songs', $('#moodtube-setting-banned-songs').val().trim());
+            saveMtSetting('favorites', $('#moodtube-setting-favorites-list').val().trim());
+            saveMtSetting('favorites_context', $('#moodtube-setting-favorites-context').is(':checked') ? 'true' : 'false');
+            saveMtSetting('hard_rule', $('#moodtube-setting-hard-rule').val().trim());
+            saveMtSetting('custom', $('#moodtube-setting-custom').val().trim());
 
             toastr.success("Настройки MoodTube сохранены");
             $('#mt-settings-modal').hide();
         });
 
-        $('#moodtube-btn-test-settings').on('click', async () => {
-            let url = $('#moodtube-setting-url').val().trim();
-            const key = $('#moodtube-setting-key').val().trim();
-            const model = $('#moodtube-setting-model').val().trim();
-            
-            if (!url || !key) {
-                toastr.warning("Введите URL и API Key");
-                return;
-            }
-            
-            if (!url.endsWith('/chat/completions')) {
-                url = url.replace(/\/+$/, '') + '/chat/completions';
-            }
-            
-            const oldText = $('#moodtube-btn-test-settings').text();
-            $('#moodtube-btn-test-settings').text('⏳').prop('disabled', true);
-            
-            try {
-                const res = await fetch(url, {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'Authorization': `Bearer ${key}`
-                    },
-                    body: JSON.stringify({
-                        model: model,
-                        messages: [{ role: 'user', content: 'respond with "ok"' }],
-                        max_tokens: 10
-                    })
-                });
-                
-                if (res.ok) {
-                    toastr.success("Соединение успешно!");
-                } else {
-                    const err = await res.json().catch(() => ({error: {message: "Unknown error"}}));
-                    toastr.error(`Ошибка: ${res.status} - ${err.error?.message || 'Check console'}`);
-                }
-            } catch (e) {
-                console.error(e);
-                toastr.error(`Ошибка сети: ${e.message}`);
-            } finally {
-                $('#moodtube-btn-test-settings').text(oldText).prop('disabled', false);
-            }
-        });
-        
         $('#moodtube-btn-close').on('click', () => {
             isPlayerFolded = true;
             updatePlayerVisibility();
         });
+
+        if (typeof eventSource !== 'undefined' && typeof event_types !== 'undefined') {
+            eventSource.on(event_types.CHAT_CHANGED, () => {
+                setTimeout(() => {
+                    restoreQueueCache();
+                    if ($('#mt-settings-modal').is(':visible')) {
+                        $('#moodtube-btn-settings').trigger('click');
+                    }
+                }, 200);
+            });
+            eventSource.on(event_types.CHAT_CLOSED, () => {
+                currentLoadedChatId = null;
+                clearQueueState(true);
+                const $fab = $('#moodtube-fab');
+                if ($fab.length && !$fab.parent().is('body')) {
+                    restoreFabStandalone($fab);
+                    $('body').append($fab);
+                }
+            });
+        }
         
         $('#moodtube-btn-ai').on('click', async () => { await triggerMoodAnalysisAndPlay(); });
-        $('#moodtube-btn-bulk-ai').on('click', async () => { await triggerBulkMoodAnalysisAndPlay(); });
 
         $('#moodtube-vol-slider').on('input', function() {
             currentVolume = $(this).val();
@@ -1852,7 +2529,10 @@ async function initializeExtension() {
         });
         observer.observe($('#moodtube-mini-player')[0]);
     }
+    applyTheme(localStorage.getItem('moodtube_theme') || 'blue');
     updatePlayerVisibility();
+    restoreQueueCache();
+    startBackgroundPrefetch();
 }
 
 $(document).ready(() => { setTimeout(initializeExtension, 1500); });
