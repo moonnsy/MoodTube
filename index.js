@@ -1103,19 +1103,24 @@ async function triggerMoodAnalysisAndPlay() {
         const bulkCount = parseInt(localStorage.getItem('moodtube_ai_bulk_count') || 10, 10);
         const isBulk = bulkCount > 1;
 
-        let defaultPrompt = `[SYSTEM NOTE: CRITICAL OVERRIDE. YOU ARE A STRICT METADATA API. 
+        const systemInstruction = `[SYSTEM NOTE: CRITICAL OVERRIDE. YOU ARE A STRICT METADATA API. 
 DO NOT ROLEPLAY. DO NOT SPEAK AS THE CHARACTER. NO GREETINGS. NO CONVERSATION.
 Read the chat history and output ONLY a valid JSON ${isBulk ? `array containing exactly ${bulkCount} track objects` : 'object'}.
 Rule 1: If a song is mentioned in the text, select it.
 Rule 2: Otherwise, choose fitting track(s) based on the mood. ${styleStr} ${antiRepeatStr} ${banListStr} ${favStr} ${rusrealRule} ${hardRuleStr}
-Format strictly: ${isBulk ? '[{"Title": "Song Name", "Artist": "Artist Name"}, ...]' : '{"Title": "Song Name", "Artist": "Artist Name"}'}
+Format strictly: ${isBulk ? '[{"Title": "Song Name", "Artist": "Artist Name"}, ...]' : '{"Title": "Song Name", "Artist": "Artist Name"}'}]`;
+
+        let defaultPrompt = `${systemInstruction}
 
 Chat History:
-${snippet}]`;
+${snippet}
+
+${systemInstruction}`;
 
         let prompt = defaultPrompt;
         if (customPrompt.trim()) {
             prompt = customPrompt.replace('{{snippet}}', snippet).replace('{{history}}', sessionPlayedTracks.join(', '));
+            prompt += `\n\n${systemInstruction}`; // Append strict rules to custom prompt as well
         }
         
         console.log(`${LOG_PREFIX} --- AI Request Prompt ---\n`, prompt);
@@ -1221,8 +1226,14 @@ ${snippet}]`;
         }
 
     } catch (e) {
-        console.error(`${LOG_PREFIX} DJ AI Parse Error:`, e);
-        toastr.error(`DJ AI Ошибка: Не смог разобрать ответ.`);
+        console.error(`${LOG_PREFIX} DJ AI Error:`, e);
+        if (e.message && e.message.includes("API Error")) {
+            toastr.error(`DJ AI Ошибка: ${e.message}`);
+        } else if (e.message && (e.message.includes("No valid JSON") || e.message.includes("Could not parse bulk tracks array"))) {
+            toastr.error(`DJ AI: ИИ вернул неверный формат (возможно, продолжил пост вместо выдачи JSON).`);
+        } else {
+            toastr.error(`DJ AI Ошибка: ${e.message || "Неизвестная ошибка"}`);
+        }
     } finally {
         isAnalysisInProgress = false;
         $('#moodtube-btn-ai').css('color', ACCENT_COLOR).removeClass('fa-spin');
