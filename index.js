@@ -1438,7 +1438,7 @@ function saveQueueCache() {
     const safeQueue = trackQueue.map(t => {
         let copy = { ...t };
         delete copy.prefetchPromise;
-        if (copy.streamUrl && copy.streamUrl.startsWith('blob:')) {
+        if (copy.streamUrl && typeof copy.streamUrl === 'string' && copy.streamUrl.startsWith('blob:')) {
             copy.streamUrl = null;
         }
         return copy;
@@ -1471,17 +1471,14 @@ function clearQueueState(skipSave = false) {
 
 let mtInitialRestoreDone = false;
 
-function restoreQueueCache(attempt = 0, forceNewChatId = false) {
+function restoreQueueCache() {
     const chatId = getActiveChatId();
-    
-    if (!chatId || (forceNewChatId && currentLoadedChatId && chatId === currentLoadedChatId)) {
-        if (attempt < 10) {
-            setTimeout(() => restoreQueueCache(attempt + 1, forceNewChatId), 500);
+    if (!chatId) {
+        if (!mtInitialRestoreDone) {
+            setTimeout(restoreQueueCache, 500);
             return;
         }
-        if (!mtInitialRestoreDone) {
-            mtInitialRestoreDone = true;
-        }
+        currentLoadedChatId = null;
         clearQueueState(true);
         return;
     }
@@ -1498,7 +1495,7 @@ function restoreQueueCache(attempt = 0, forceNewChatId = false) {
         const c = cache[chatId];
         trackQueue = c.queue || [];
         trackQueue.forEach(t => {
-            if (t.streamUrl && t.streamUrl.startsWith('blob:')) t.streamUrl = null;
+            if (t.streamUrl && typeof t.streamUrl === 'string' && t.streamUrl.startsWith('blob:')) t.streamUrl = null;
         });
         currentQueueIndex = c.currentIndex !== undefined ? c.currentIndex : -1;
         sessionPlayedTracks = c.playedTracks || [];
@@ -1534,7 +1531,7 @@ function restoreQueueCache(attempt = 0, forceNewChatId = false) {
                         }
                     });
                 }
-            } else if (track.videoId && ytPlayer && typeof ytPlayer.cueVideoById === 'function') {
+            } else if (track.videoId && !track.videoId.startsWith('spotify:') && ytPlayer && typeof ytPlayer.cueVideoById === 'function') {
                 try { ytPlayer.cueVideoById(track.videoId); } catch(e) {}
             }
         } else {
@@ -2786,20 +2783,28 @@ async function initializeExtension() {
             const source = localStorage.getItem('moodtube_playback_source') || 'youtube';
             if (source === 'spotify') {
                 const wasPlaying = isCurrentlyPlaying;
+                
+                const track = trackQueue[currentQueueIndex];
+                if (!wasPlaying && track && track.videoId && track.videoId.startsWith('spotify:') && (!currentSpotifyTrackId || !track.videoId.includes(currentSpotifyTrackId))) {
+                    playTrack(track);
+                    return;
+                }
+
                 if (spotifyPlayer && isSpotifyReady) {
                     if (wasPlaying) spotifyPlayer.pause();
                     else spotifyPlayer.resume();
                 }
                 const token = await refreshSpotifyToken();
                 if (token) {
+                    const deviceParam = spotifyDeviceId ? `?device_id=${spotifyDeviceId}` : '';
                     if (wasPlaying) {
-                        fetch('https://api.spotify.com/v1/me/player/pause', { method: 'PUT', headers: { Authorization: `Bearer ${token}` } })
+                        fetch('https://api.spotify.com/v1/me/player/pause' + deviceParam, { method: 'PUT', headers: { Authorization: `Bearer ${token}` } })
                             .then(res => { if (!res.ok) res.json().then(data => toastr.error("Spotify: " + (data.error?.message || "Ошибка паузы"))); })
                             .catch(()=>{});
                         isCurrentlyPlaying = false;
                         $('#moodtube-btn-playpause').attr('class', 'fa-solid fa-play moodtube-ctrl');
                     } else {
-                        fetch('https://api.spotify.com/v1/me/player/play', { method: 'PUT', headers: { Authorization: `Bearer ${token}` } })
+                        fetch('https://api.spotify.com/v1/me/player/play' + deviceParam, { method: 'PUT', headers: { Authorization: `Bearer ${token}` } })
                             .then(res => { if (!res.ok) res.json().then(data => toastr.error("Spotify: " + (data.error?.message || "Ошибка воспроизведения"))); })
                             .catch(()=>{});
                         isCurrentlyPlaying = true;
@@ -3260,22 +3265,20 @@ async function initializeExtension() {
 
         if (typeof eventSource !== 'undefined' && typeof event_types !== 'undefined') {
             eventSource.on(event_types.CHAT_CHANGED, () => {
-                restoreQueueCache(0, true);
                 setTimeout(() => {
+                    restoreQueueCache();
                     if ($('#mt-settings-modal').is(':visible')) {
                         $('#moodtube-btn-settings').trigger('click');
                     }
                 }, 200);
             });
             eventSource.on(event_types.CHAT_CLOSED, () => {
-                if (!getActiveChatId()) {
-                    currentLoadedChatId = null;
-                    clearQueueState(true);
-                    const $fab = $('#moodtube-fab');
-                    if ($fab.length && !$fab.parent().is('body')) {
-                        restoreFabStandalone($fab);
-                        $('body').append($fab);
-                    }
+                currentLoadedChatId = null;
+                clearQueueState(true);
+                const $fab = $('#moodtube-fab');
+                if ($fab.length && !$fab.parent().is('body')) {
+                    restoreFabStandalone($fab);
+                    $('body').append($fab);
                 }
             });
         }
