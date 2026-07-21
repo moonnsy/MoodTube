@@ -2899,8 +2899,6 @@ async function initializeExtension() {
 
         // Обновление прогресс-бара
         setInterval(() => {
-            if (!isCurrentlyPlaying) return;
-            
             let current = 0;
             let total = 0;
             
@@ -2915,7 +2913,9 @@ async function initializeExtension() {
                             if (!$('#moodtube-progress-slider').is(':active')) {
                                 $('#moodtube-progress-slider').val((current / total) * 100);
                             }
-                            if (!window.isSpotifyPlaylistActive && total - current <= 1.5 && !state.paused) {
+                            if (!window.isSpotifyPlaylistActive && !window.mtSkipTimeout && current > 0 && total - current <= 1.5 && !state.paused) {
+                                window.mtSkipTimeout = true;
+                                setTimeout(() => window.mtSkipTimeout = false, 5000);
                                 isCurrentlyPlaying = false;
                                 try { spotifyPlayer.pause(); } catch(e){}
                                 setTimeout(playNextInQueue, 300);
@@ -2924,7 +2924,11 @@ async function initializeExtension() {
                     }
                 });
                 return;
-            } else if (isUsingAudioFallback && audioFallback) {
+            }
+            
+            if (!isCurrentlyPlaying) return;
+
+            if (isUsingAudioFallback && audioFallback) {
                 current = audioFallback.currentTime || 0;
                 total = audioFallback.duration || 0;
             } else if (ytPlayer && typeof ytPlayer.getCurrentTime === 'function' && typeof ytPlayer.getDuration === 'function') {
