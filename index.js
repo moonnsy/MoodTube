@@ -1142,6 +1142,9 @@ async function playTrack(videoInfo) {
     }
 
     // Explicitly stop any playing media to prevent overlapping
+    if (typeof spotifyPlayer !== 'undefined' && spotifyPlayer && isSpotifyReady) {
+        try { spotifyPlayer.pause(); } catch(e) {}
+    }
     if (ytPlayer && typeof ytPlayer.stopVideo === 'function') {
         try { ytPlayer.stopVideo(); } catch(e) {}
     }
@@ -1187,9 +1190,13 @@ async function playTrack(videoInfo) {
                     method: 'PUT',
                     body: JSON.stringify({ uris: [videoInfo.videoId] }),
                     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }
-                }).then(() => {
-                    isCurrentlyPlaying = true;
-                    $('#moodtube-btn-playpause').attr('class', 'fa-solid fa-pause moodtube-ctrl');
+                }).then(res => {
+                    if (res.ok) {
+                        isCurrentlyPlaying = true;
+                        $('#moodtube-btn-playpause').attr('class', 'fa-solid fa-pause moodtube-ctrl');
+                    } else {
+                        res.json().then(data => toastr.error("Spotify: " + (data.error?.message || "Ошибка API"))).catch(()=>{});
+                    }
                 }).catch(e => console.error(e));
             } else {
                 toastr.error("Spotify плеер не готов!");
@@ -2892,8 +2899,6 @@ async function initializeExtension() {
 
         // Обновление прогресс-бара
         setInterval(() => {
-            if (!isCurrentlyPlaying) return;
-            
             let current = 0;
             let total = 0;
             
@@ -2908,11 +2913,22 @@ async function initializeExtension() {
                             if (!$('#moodtube-progress-slider').is(':active')) {
                                 $('#moodtube-progress-slider').val((current / total) * 100);
                             }
+                            if (!window.isSpotifyPlaylistActive && !window.mtSkipTimeout && current > 0 && total - current <= 1.5 && !state.paused) {
+                                window.mtSkipTimeout = true;
+                                setTimeout(() => window.mtSkipTimeout = false, 5000);
+                                isCurrentlyPlaying = false;
+                                try { spotifyPlayer.pause(); } catch(e){}
+                                setTimeout(playNextInQueue, 300);
+                            }
                         }
                     }
                 });
                 return;
-            } else if (isUsingAudioFallback && audioFallback) {
+            }
+            
+            if (!isCurrentlyPlaying) return;
+
+            if (isUsingAudioFallback && audioFallback) {
                 current = audioFallback.currentTime || 0;
                 total = audioFallback.duration || 0;
             } else if (ytPlayer && typeof ytPlayer.getCurrentTime === 'function' && typeof ytPlayer.getDuration === 'function') {
