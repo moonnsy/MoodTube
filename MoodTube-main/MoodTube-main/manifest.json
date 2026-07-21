@@ -1,0 +1,12 @@
+{
+    "name": "MoodTube",
+    "display_name": "MoodTube",
+    "description": "YouTube music player for moods",
+    "version": "1.0.0",
+    "author": "Moonnsy",
+    "js": "index.js",
+    "module": true,
+    "requires": [],
+    "optional": [],
+    "assets": []
+}
