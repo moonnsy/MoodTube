@@ -382,7 +382,7 @@ async function refreshSpotifyToken() {
 }
 
 function initSpotifyPlayer() {
-    if (spotifyPlayer) return;
+    if (spotifyPlayer && isSpotifyReady) return;
     const script = document.createElement("script");
     script.src = "https://sdk.scdn.co/spotify-player.js";
     script.async = true;
@@ -392,42 +392,88 @@ function initSpotifyPlayer() {
         const token = await refreshSpotifyToken();
         if (!token) return;
 
-        spotifyPlayer = new window.Spotify.Player({
-            name: 'MoodTube Web Player',
-            getOAuthToken: cb => { 
-                refreshSpotifyToken().then(t => { if(t) cb(t); });
-            },
-            volume: currentVolume / 100
-        });
-
-        spotifyPlayer.addListener('ready', ({ device_id }) => {
-            console.log('[MoodTube] Spotify Ready with Device ID', device_id);
-            spotifyDeviceId = device_id;
-            isSpotifyReady = true;
-            try { spotifyPlayer.pause(); } catch(e){} // Force pause on connect to prevent auto-resume
-        });
-
-        spotifyPlayer.addListener('not_ready', ({ device_id }) => {
-            console.log('[MoodTube] Spotify Device ID has gone offline', device_id);
-            isSpotifyReady = false;
-        });
-        
-        spotifyPlayer.addListener('player_state_changed', state => {
-            if (!state) return;
-            isCurrentlyPlaying = !state.paused;
-            $('#moodtube-btn-playpause').attr('class', isCurrentlyPlaying ? 'fa-solid fa-pause moodtube-ctrl' : 'fa-solid fa-play moodtube-ctrl');
+        function createAndConnectPlayer(attempt) {
+            attempt = attempt || 1;
+            console.log('[MoodTube] Spotify SDK: creating player, attempt ' + attempt);
             
-            if (state.paused && state.position === 0 && state.track_window.previous_tracks.find(x => x.id === currentSpotifyTrackId)) {
-                if (!state.track_window.current_track || state.track_window.current_track.id !== currentSpotifyTrackId) {
-                    currentSpotifyTrackId = null;
-                    playNextInQueue();
-                }
-            } else if (state.track_window.current_track) {
-                currentSpotifyTrackId = state.track_window.current_track.id;
-            }
-        });
+            const player = new window.Spotify.Player({
+                name: 'MoodTube Web Player',
+                getOAuthToken: cb => { 
+                    refreshSpotifyToken().then(t => { if(t) cb(t); });
+                },
+                volume: currentVolume / 100
+            });
 
-        spotifyPlayer.connect();
+            player.addListener('ready', ({ device_id }) => {
+                console.log('[MoodTube] Spotify Ready with Device ID', device_id);
+                spotifyDeviceId = device_id;
+                isSpotifyReady = true;
+                spotifyPlayer = player;
+            });
+
+            player.addListener('not_ready', ({ device_id }) => {
+                console.log('[MoodTube] Spotify Device ID has gone offline', device_id);
+                isSpotifyReady = false;
+                spotifyDeviceId = null;
+            });
+
+            player.addListener('initialization_error', ({ message }) => {
+                console.error('[MoodTube] Spotify initialization_error:', message);
+                if (attempt < 3) {
+                    console.log('[MoodTube] Retrying in ' + (attempt * 2) + 's...');
+                    setTimeout(() => createAndConnectPlayer(attempt + 1), attempt * 2000);
+                } else {
+                    toastr.error("Spotify SDK не смог инициализироваться: " + message);
+                }
+            });
+
+            player.addListener('authentication_error', ({ message }) => {
+                console.error('[MoodTube] Spotify authentication_error:', message);
+                toastr.warning("Spotify: ошибка токена. Попробуйте переавторизоваться.");
+            });
+
+            player.addListener('account_error', ({ message }) => {
+                console.error('[MoodTube] Spotify account_error:', message);
+                toastr.error("Spotify: ошибка аккаунта — " + message);
+            });
+            
+            player.addListener('player_state_changed', state => {
+                if (!state) return;
+                isCurrentlyPlaying = !state.paused;
+                $('#moodtube-btn-playpause').attr('class', isCurrentlyPlaying ? 'fa-solid fa-pause moodtube-ctrl' : 'fa-solid fa-play moodtube-ctrl');
+                
+                if (state.paused && state.position === 0 && state.track_window.previous_tracks.find(x => x.id === currentSpotifyTrackId)) {
+                    if (!state.track_window.current_track || state.track_window.current_track.id !== currentSpotifyTrackId) {
+                        currentSpotifyTrackId = null;
+                        playNextInQueue();
+                    }
+                } else if (state.track_window.current_track) {
+                    currentSpotifyTrackId = state.track_window.current_track.id;
+                }
+            });
+
+            player.connect().then(success => {
+                if (success) {
+                    console.log('[MoodTube] Spotify player connect() succeeded');
+                    spotifyPlayer = player;
+                } else {
+                    console.warn('[MoodTube] Spotify player connect() returned false');
+                    if (attempt < 3) {
+                        console.log('[MoodTube] Retrying connect in ' + (attempt * 2) + 's...');
+                        setTimeout(() => createAndConnectPlayer(attempt + 1), attempt * 2000);
+                    } else {
+                        toastr.error("Spotify плеер не смог подключиться после 3 попыток.");
+                    }
+                }
+            }).catch(err => {
+                console.error('[MoodTube] Spotify connect() error:', err);
+                if (attempt < 3) {
+                    setTimeout(() => createAndConnectPlayer(attempt + 1), attempt * 2000);
+                }
+            });
+        }
+
+        createAndConnectPlayer(1);
     };
 }
 
@@ -1432,7 +1478,7 @@ function restoreQueueCache() {
             setTimeout(restoreQueueCache, 500);
             return;
         }
-        clearQueueState();
+        clearQueueState(true);
         return;
     }
 
