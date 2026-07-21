@@ -3,12 +3,6 @@
 import { getContext } from '../../../extensions.js';
 import { generateRaw, eventSource, event_types } from '../../../../script.js';
 
-if (!localStorage.getItem('moodtube_spotify_scopes_v3')) {
-    localStorage.removeItem('moodtube_spotify_token');
-    localStorage.setItem('moodtube_spotify_scopes_v3', 'true');
-    console.log("[MoodTube] Old Spotify token cleared to apply new scopes.");
-}
-
 const extensionName = "MoodTube";
 const LOG_PREFIX = "[MoodTube]";
 
@@ -243,539 +237,6 @@ async function getInvidiousStream(videoId) {
     } catch(e) {
         return null;
     }
-}
-
-
-// --- SPOTIFY API & PLAYER ---
-let spotifyPlayer = null;
-let spotifyDeviceId = null;
-let isSpotifyReady = false;
-let currentSpotifyTrackId = null;
-
-function generateRandomString(length) {
-    const possible = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
-    const values = crypto.getRandomValues(new Uint8Array(length));
-    let text = '';
-    for (let i = 0; i < values.length; i++) {
-        text += possible[values[i] % possible.length];
-    }
-    return text;
-}
-
-async function sha256(plain) {
-    if (!window.crypto || !window.crypto.subtle) {
-        toastr.error("Браузер блокирует авторизацию (требуется HTTPS)");
-        throw new Error("crypto.subtle is undefined. Requires HTTPS.");
-    }
-    const encoder = new TextEncoder();
-    const data = encoder.encode(plain);
-    const hash = await crypto.subtle.digest('SHA-256', data);
-    return hash;
-}
-
-function base64encode(hash) {
-    return btoa(String.fromCharCode.apply(null, new Uint8Array(hash)))
-        .replace(/=/g, '')
-        .replace(/\+/g, '-')
-        .replace(/\//g, '_');
-}
-
-async function authSpotify() {
-    const clientId = $('#moodtube-spotify-client-id').val().trim();
-    if (!clientId) { toastr.error("Введите Client ID"); return; }
-    
-    const codeVerifier = generateRandomString(64);
-    const hashed = await sha256(codeVerifier);
-    const codeChallenge = base64encode(hashed);
-    const redirectUri = window.location.origin + '/';
-    
-    localStorage.setItem('moodtube_spotify_verifier', codeVerifier);
-    localStorage.setItem('moodtube_spotify_client_id', clientId);
-    localStorage.setItem('moodtube_spotify_redirect', redirectUri);
-    
-    const params = new URLSearchParams({
-        client_id: clientId,
-        response_type: 'code',
-        redirect_uri: redirectUri,
-        code_challenge_method: 'S256',
-        code_challenge: codeChallenge,
-        scope: 'streaming user-read-email user-read-private user-read-playback-state user-modify-playback-state playlist-read-private playlist-read-collaborative playlist-modify-public playlist-modify-private user-library-read user-library-modify',
-        show_dialog: 'true'
-    });
-    
-    window.open(`https://accounts.spotify.com/authorize?${params.toString()}`, '_blank');
-}
-
-async function handleSpotifyCallback() {
-    const params = new URLSearchParams(window.location.search);
-    const code = params.get('code');
-    const verifier = localStorage.getItem('moodtube_spotify_verifier');
-    const clientId = localStorage.getItem('moodtube_spotify_client_id');
-    const redirectUri = localStorage.getItem('moodtube_spotify_redirect') || (window.location.origin + '/');
-    
-    if (code && verifier && clientId) {
-        const payload = new URLSearchParams({
-            client_id: clientId,
-            grant_type: 'authorization_code',
-            redirect_uri: redirectUri,
-            code_verifier: verifier,
-            code: code,
-        });
-        
-        try {
-            const res = await fetch('https://accounts.spotify.com/api/token', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-                body: payload
-            });
-            if (res.ok) {
-                const tokenData = await res.json();
-                tokenData.expires_at = Date.now() + tokenData.expires_in * 1000;
-                localStorage.setItem('moodtube_spotify_token', JSON.stringify(tokenData));
-                
-                document.body.innerHTML = '<div style="display:flex; justify-content:center; align-items:center; height:100vh; background:#121212; color:#1DB954; font-family:sans-serif; font-size:24px;">Авторизация успешна! Можете закрыть эту вкладку.</div>';
-                setTimeout(() => window.close(), 1500);
-            } else {
-                const errText = await res.text();
-                toastr.error("Ошибка Spotify: " + errText);
-                console.error("[MoodTube] Spotify auth token error:", errText);
-                document.body.innerHTML = '<div style="display:flex; justify-content:center; align-items:center; height:100vh; background:#121212; color:#ff4444; font-family:sans-serif; font-size:20px; text-align:center; padding: 20px;">Ошибка Spotify: ' + errText + '<br><br>Закройте вкладку и попробуйте снова.</div>';
-            }
-        } catch(e) {
-            console.error("[MoodTube] Spotify auth error", e);
-        }
-        localStorage.removeItem('moodtube_spotify_verifier');
-    }
-}
-
-async function refreshSpotifyToken() {
-    let tokenData = null;
-    try { tokenData = JSON.parse(localStorage.getItem('moodtube_spotify_token')); } catch(e){}
-    if (!tokenData || !tokenData.refresh_token) return null;
-    
-    if (Date.now() < tokenData.expires_at - 60000) return tokenData.access_token;
-    
-    const clientId = localStorage.getItem('moodtube_spotify_client_id');
-    const payload = new URLSearchParams({
-        grant_type: 'refresh_token',
-        refresh_token: tokenData.refresh_token,
-        client_id: clientId,
-    });
-    
-    try {
-        const res = await fetch('https://accounts.spotify.com/api/token', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-            body: payload
-        });
-        if (res.ok) {
-            const newToken = await res.json();
-            if (!newToken.refresh_token) newToken.refresh_token = tokenData.refresh_token;
-            newToken.expires_at = Date.now() + newToken.expires_in * 1000;
-            localStorage.setItem('moodtube_spotify_token', JSON.stringify(newToken));
-            return newToken.access_token;
-        } else {
-            console.warn("[MoodTube] Failed to refresh Spotify token");
-        }
-    } catch(e) { console.error("[MoodTube] Refresh token error", e); }
-    return null;
-}
-
-function initSpotifyPlayer() {
-    if (spotifyPlayer && isSpotifyReady) return;
-    const script = document.createElement("script");
-    script.src = "https://sdk.scdn.co/spotify-player.js";
-    script.async = true;
-    document.body.appendChild(script);
-
-    window.onSpotifyWebPlaybackSDKReady = async () => {
-        const token = await refreshSpotifyToken();
-        if (!token) return;
-
-        function createAndConnectPlayer(attempt) {
-            attempt = attempt || 1;
-            console.log('[MoodTube] Spotify SDK: creating player, attempt ' + attempt);
-            
-            const player = new window.Spotify.Player({
-                name: 'MoodTube Web Player',
-                getOAuthToken: cb => { 
-                    refreshSpotifyToken().then(t => { if(t) cb(t); });
-                },
-                volume: currentVolume / 100
-            });
-
-            player.addListener('ready', ({ device_id }) => {
-                console.log('[MoodTube] Spotify Ready with Device ID', device_id);
-                spotifyDeviceId = device_id;
-                isSpotifyReady = true;
-                spotifyPlayer = player;
-            });
-
-            player.addListener('not_ready', ({ device_id }) => {
-                console.log('[MoodTube] Spotify Device ID has gone offline', device_id);
-                isSpotifyReady = false;
-                spotifyDeviceId = null;
-            });
-
-            player.addListener('initialization_error', ({ message }) => {
-                console.error('[MoodTube] Spotify initialization_error:', message);
-                if (attempt < 3) {
-                    console.log('[MoodTube] Retrying in ' + (attempt * 2) + 's...');
-                    setTimeout(() => createAndConnectPlayer(attempt + 1), attempt * 2000);
-                } else {
-                    toastr.error("Spotify SDK не смог инициализироваться: " + message);
-                }
-            });
-
-            player.addListener('authentication_error', ({ message }) => {
-                console.error('[MoodTube] Spotify authentication_error:', message);
-                toastr.warning("Spotify: ошибка токена. Попробуйте переавторизоваться.");
-            });
-
-            player.addListener('account_error', ({ message }) => {
-                console.error('[MoodTube] Spotify account_error:', message);
-                toastr.error("Spotify: ошибка аккаунта — " + message);
-            });
-            
-            player.addListener('player_state_changed', state => {
-                if (!state) return;
-                isCurrentlyPlaying = !state.paused;
-                $('#moodtube-btn-playpause').attr('class', isCurrentlyPlaying ? 'fa-solid fa-pause moodtube-ctrl' : 'fa-solid fa-play moodtube-ctrl');
-                
-                if (state.paused && state.position === 0 && state.track_window.previous_tracks.find(x => x.id === currentSpotifyTrackId)) {
-                    if (!state.track_window.current_track || state.track_window.current_track.id !== currentSpotifyTrackId) {
-                        currentSpotifyTrackId = null;
-                        playNextInQueue();
-                    }
-                } else if (state.track_window.current_track) {
-                    currentSpotifyTrackId = state.track_window.current_track.id;
-                }
-            });
-
-            player.connect().then(success => {
-                if (success) {
-                    console.log('[MoodTube] Spotify player connect() succeeded');
-                    spotifyPlayer = player;
-                } else {
-                    console.warn('[MoodTube] Spotify player connect() returned false');
-                    if (attempt < 3) {
-                        console.log('[MoodTube] Retrying connect in ' + (attempt * 2) + 's...');
-                        setTimeout(() => createAndConnectPlayer(attempt + 1), attempt * 2000);
-                    } else {
-                        toastr.error("Spotify плеер не смог подключиться после 3 попыток.");
-                    }
-                }
-            }).catch(err => {
-                console.error('[MoodTube] Spotify connect() error:', err);
-                if (attempt < 3) {
-                    setTimeout(() => createAndConnectPlayer(attempt + 1), attempt * 2000);
-                }
-            });
-        }
-
-        createAndConnectPlayer(1);
-    };
-}
-
-async function searchSpotify(query) {
-    const token = await refreshSpotifyToken();
-    if (!token) {
-        console.warn("[MoodTube] No Spotify token for search");
-        return null;
-    }
-    const cleanQuery = query.replace(/[\[\](){}]/g, '').trim();
-    try {
-        const res = await fetch(`https://api.spotify.com/v1/search?q=${encodeURIComponent(cleanQuery)}&type=track&limit=1`, {
-            headers: { Authorization: `Bearer ${token}` }
-        });
-        if (!res.ok) return null;
-        const data = await res.json();
-        if (data.tracks && data.tracks.items && data.tracks.items.length > 0) {
-            const track = data.tracks.items[0];
-            return {
-                videoId: track.uri,
-                spotifyId: track.id,
-                title: `${track.artists[0].name} - ${track.name}`,
-                videoThumbnails: track.album.images.length > 0 ? [{url: track.album.images[0].url}] : [],
-                isSpotify: true
-            };
-        }
-    } catch (e) {
-        console.error("[MoodTube] Spotify search error", e);
-    }
-    return null;
-}
-
-let userSpotifyPlaylists = [];
-let userSpotifyId = null;
-
-async function fetchSpotifyPlaylists() {
-    const token = await refreshSpotifyToken();
-    if (!token) return [];
-    
-    let localPls = [];
-    try { localPls = JSON.parse(localStorage.getItem('moodtube_local_playlists') || '[]'); } catch(e){}
-
-    try {
-        const res = await fetch(`https://api.spotify.com/v1/me/playlists?limit=50`, {
-            headers: { Authorization: `Bearer ${token}` }
-        });
-        if (res.ok) {
-            const data = await res.json();
-            userSpotifyPlaylists = data.items;
-        } else {
-            console.warn("[MoodTube] Spotify API blocked fetching playlists. Using local cache.");
-        }
-    } catch(e) { console.error(e); }
-    
-    try {
-        const merged = [...(userSpotifyPlaylists || [])];
-        for (const lp of localPls) {
-            if (lp && lp.id && !merged.find(p => p && p.id === lp.id)) merged.push(lp);
-        }
-        return merged;
-    } catch(e) {
-        console.error("Merge error:", e);
-        return localPls || [];
-    }
-}
-
-async function fetchSpotifyUser() {
-    if (userSpotifyId) return userSpotifyId;
-    const token = await refreshSpotifyToken();
-    if (!token) return null;
-    try {
-        const res = await fetch(`https://api.spotify.com/v1/me`, {
-            headers: { Authorization: `Bearer ${token}` }
-        });
-        if (res.ok) {
-            const data = await res.json();
-            userSpotifyId = data.id;
-            return data.id;
-        }
-    } catch(e) { console.error(e); }
-    return null;
-}
-
-async function showSpotifyPlaylists() {
-    $('#moodtube-inner-content').hide();
-    $('#moodtube-queue-container').hide();
-    $('#moodtube-btn-close').hide();
-    $('#moodtube-spotify-playlists-container').css('display', 'flex');
-    
-    const $list = $('#moodtube-playlists-list');
-    $list.empty().append('<div style="text-align:center; padding:10px;"><i class="fa-solid fa-spinner fa-spin"></i> Загрузка...</div>');
-    
-    try {
-        const playlists = await fetchSpotifyPlaylists();
-        $list.empty();
-        
-        if (!playlists || playlists.length === 0) {
-            $list.append('<div style="font-size:12px; color:#888; text-align:center; padding:10px;">Плейлисты не найдены. Создайте новый в меню трека.</div>');
-            return;
-        }
-        
-        playlists.forEach(pl => {
-            if (!pl || !pl.id) return;
-            const imgUrl = (pl.images && pl.images.length > 0) ? pl.images[0].url : 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
-            const $item = $(`
-                <div style="display:flex; align-items:center; gap:10px; padding:8px 10px; cursor:pointer; border-radius:10px; margin-bottom:5px; background:rgba(0,0,0,0.3); border:1px solid transparent; transition:0.2s;">
-                    <img src="${imgUrl}" style="width:30px; height:30px; border-radius:5px; object-fit:cover; flex-shrink:0;">
-                    <div style="flex:1; overflow:hidden;">
-                        <div style="font-weight:bold; font-size:13px; color:#fff; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${pl.name || 'Без названия'}</div>
-                    </div>
-                </div>
-            `);
-            $item.hover(function(){ $(this).css('background', 'rgba(255,255,255,0.1)'); }, function(){ $(this).css('background', 'rgba(0,0,0,0.3)'); });
-            $item.on('click', () => {
-                playSpotifyPlaylist(`spotify:playlist:${pl.id}`, pl.name || 'Без названия');
-            });
-            $list.append($item);
-        });
-    } catch(err) {
-        $list.empty().append('<div style="font-size:12px; color:#f55; text-align:center; padding:10px;">Ошибка загрузки плейлистов.</div>');
-        console.error(err);
-    }
-}
-
-async function playSpotifyPlaylist(uri, name) {
-    const token = await refreshSpotifyToken();
-    if (!token || !spotifyDeviceId) return;
-    
-    fetch(`https://api.spotify.com/v1/me/player/play?device_id=${spotifyDeviceId}`, {
-        method: 'PUT',
-        body: JSON.stringify({ context_uri: uri }),
-        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }
-    }).then(() => {
-        isCurrentlyPlaying = true;
-        window.isSpotifyPlaylistActive = true;
-        $('#moodtube-btn-playpause').attr('class', 'fa-solid fa-pause moodtube-ctrl');
-        toastr.success(`Включен плейлист: ${name}`);
-        $('#moodtube-btn-close-playlists').trigger('click');
-        $('#moodtube-widget-title').text(`Playlist: ${name}`);
-    }).catch(e => { console.error(e); toastr.error("Ошибка при включении плейлиста"); });
-}
-
-function showSpotifyAddToPlaylistMenu(track) {
-    if ($('#moodtube-add-playlist-modal').length === 0) {
-        $(`
-        <div id="moodtube-add-playlist-modal" style="display:none; position:fixed; top:0; left:0; width:100vw; height:100vh; background:rgba(0,0,0,0.6); z-index:9999999; justify-content:center; align-items:center; backdrop-filter:blur(5px);">
-            <div style="background:var(--mt-bg-primary); border:1px solid var(--mt-border); border-radius:12px; width:300px; max-height:80vh; display:flex; flex-direction:column; box-shadow:0 10px 30px rgba(0,0,0,0.5);">
-                <div style="padding:15px; border-bottom:1px solid var(--mt-border); display:flex; justify-content:space-between; align-items:center;">
-                    <span style="font-weight:bold; color:#fff;">Добавить в плейлист</span>
-                    <i class="fa-solid fa-xmark moodtube-ctrl" id="moodtube-close-add-modal" style="cursor:pointer; color:#888;"></i>
-                </div>
-                <div style="padding:10px; border-bottom:1px solid var(--mt-border);">
-                    <button id="moodtube-btn-create-new-pl" style="width:100%; padding:8px; background:var(--mt-accent); color:#000; border:none; border-radius:5px; cursor:pointer; font-weight:bold;">+ Создать новый</button>
-                </div>
-                <div id="moodtube-add-playlists-list" style="flex:1; overflow-y:auto; padding:10px;">
-                </div>
-            </div>
-        </div>
-        `).appendTo('body');
-
-        $('#moodtube-close-add-modal').on('click', () => {
-            $('#moodtube-add-playlist-modal').hide();
-        });
-
-        $('#moodtube-add-playlist-modal').on('click', (e) => {
-            if (e.target.id === 'moodtube-add-playlist-modal') {
-                $('#moodtube-add-playlist-modal').hide();
-            }
-        });
-    }
-
-    const spotifyId = track.videoId.split(':')[2];
-    $('#moodtube-add-playlist-modal').css('display', 'flex');
-    
-    $('#moodtube-create-pl-view').hide();
-    $('#moodtube-add-playlists-list').show();
-    $('#moodtube-btn-create-new-pl').show();
-    $('#moodtube-new-pl-name').val('');
-    
-    const $list = $('#moodtube-add-playlists-list');
-    $list.empty().append('<div style="text-align:center; padding:10px;"><i class="fa-solid fa-spinner fa-spin"></i></div>');
-
-    fetchSpotifyPlaylists().then(playlists => {
-        $list.empty();
-        
-        if (!playlists || playlists.length === 0) {
-            $list.append('<div style="text-align:center; padding:10px; color:#888; font-size:13px;">Нет сохраненных плейлистов.</div>');
-            return;
-        }
-        try {
-            playlists.forEach(pl => {
-                if (!pl || !pl.id) return;
-                const $item = $(`
-                    <div style="padding:10px; border-radius:5px; cursor:pointer; color:#fff; font-size:13px; margin-bottom:5px; background:rgba(255,255,255,0.05);">
-                        ${pl.name || 'Без названия'}
-                    </div>
-                `);
-                $item.on('click', async () => {
-                    const token = await refreshSpotifyToken();
-                    if (token) {
-                        try {
-                            const uriParam = encodeURIComponent(track.videoId);
-                            const res = await fetch(`https://api.spotify.com/v1/playlists/${pl.id}/items?uris=${uriParam}`, {
-                                method: 'POST',
-                                headers: { Authorization: `Bearer ${token}` }
-                            });
-                            if (res.ok) {
-                                toastr.success(`Трек добавлен в "${pl.name}"`);
-                                $('#moodtube-add-playlist-modal').hide();
-                            } else {
-                                const err = await res.json().catch(()=>({}));
-                                toastr.error("Spotify: " + (err.error?.message || "Не удалось добавить"));
-                            }
-                        } catch(e) { console.error(e); }
-                    }
-                });
-                $list.append($item);
-            });
-        } catch(err) {
-            $list.append('<div style="text-align:center; padding:10px; color:#f55; font-size:13px;">Ошибка отображения</div>');
-        }
-    });
-
-    $('#moodtube-btn-create-new-pl').off('click').on('click', async () => {
-        $('#moodtube-add-playlists-list').hide();
-        $('#moodtube-btn-create-new-pl').hide();
-        
-        if ($('#moodtube-create-pl-view').length === 0) {
-            $(`
-            <div id="moodtube-create-pl-view" style="padding:10px; display:flex; flex-direction:column; gap:10px;">
-                <input type="text" id="moodtube-new-pl-name" placeholder="Название плейлиста..." style="padding:8px 10px; border-radius:5px; border:1px solid var(--mt-border); background:var(--mt-bg-input); color:#fff; outline:none; font-family:inherit;">
-                <div style="display:flex; gap:10px;">
-                    <button id="moodtube-btn-cancel-create" style="flex:1; padding:8px; background:rgba(255,255,255,0.1); color:#fff; border:none; border-radius:5px; cursor:pointer;">Отмена</button>
-                    <button id="moodtube-btn-confirm-create" style="flex:1; padding:8px; background:var(--mt-accent); color:#000; border:none; border-radius:5px; cursor:pointer; font-weight:bold;">Создать</button>
-                </div>
-            </div>
-            `).insertAfter('#moodtube-add-playlists-list');
-            
-            $('#moodtube-btn-cancel-create').on('click', () => {
-                $('#moodtube-create-pl-view').hide();
-                $('#moodtube-add-playlists-list').show();
-                $('#moodtube-btn-create-new-pl').show();
-                $('#moodtube-new-pl-name').val('');
-            });
-        }
-        
-        $('#moodtube-create-pl-view').show();
-        $('#moodtube-new-pl-name').focus();
-        
-        $('#moodtube-btn-confirm-create').off('click').on('click', async () => {
-            const name = $('#moodtube-new-pl-name').val().trim();
-            if (!name) return;
-            
-            const oldText = $('#moodtube-btn-confirm-create').text();
-            $('#moodtube-btn-confirm-create').text('⏳').prop('disabled', true);
-            
-            const userId = await fetchSpotifyUser();
-            if (!userId) { 
-                toastr.error("Не удалось получить User ID"); 
-                $('#moodtube-btn-confirm-create').text(oldText).prop('disabled', false);
-                return; 
-            }
-            
-            const token = await refreshSpotifyToken();
-            if (token) {
-                try {
-                    const res = await fetch(`https://api.spotify.com/v1/me/playlists`, {
-                        method: 'POST',
-                        body: JSON.stringify({ name: name, public: false }),
-                        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }
-                    });
-                    if (res.ok) {
-                        const newPl = await res.json();
-                        
-                        // Save to local cache
-                        let localPls = [];
-                        try { localPls = JSON.parse(localStorage.getItem('moodtube_local_playlists') || '[]'); } catch(e){}
-                        localPls.push({ id: newPl.id, name: newPl.name });
-                        localStorage.setItem('moodtube_local_playlists', JSON.stringify(localPls));
-                        
-                        const uriParam = encodeURIComponent(track.videoId);
-                        const addRes = await fetch(`https://api.spotify.com/v1/playlists/${newPl.id}/items?uris=${uriParam}`, {
-                            method: 'POST',
-                            headers: { Authorization: `Bearer ${token}` }
-                        });
-                        if (addRes.ok) {
-                            toastr.success(`Плейлист "${name}" создан и трек добавлен!`);
-                            $('#moodtube-add-playlist-modal').hide();
-                            $('#moodtube-btn-cancel-create').trigger('click');
-                        } else {
-                            const err = await addRes.json().catch(()=>({}));
-                            toastr.error("Spotify: " + (err.error?.message || "Не удалось добавить трек"));
-                        }
-                    } else {
-                        const err = await res.json().catch(()=>({}));
-                        toastr.error("Spotify: " + (err.error?.message || "Ошибка создания плейлиста"));
-                    }
-                } catch(e) { console.error(e); toastr.error("Сетевая ошибка при создании плейлиста"); }
-            }
-            $('#moodtube-btn-confirm-create').text(oldText).prop('disabled', false);
-        });
-    });
 }
 
 async function searchYouTube(query, isRetry = false) {
@@ -1171,38 +632,6 @@ async function playTrack(videoInfo) {
     }
     
     const currentVideoId = videoInfo.videoId;
-    const source = localStorage.getItem('moodtube_playback_source') || 'youtube';
-
-    if (source === 'spotify' && videoInfo.videoId && videoInfo.videoId.startsWith('spotify:track:')) {
-        $('#moodtube-widget-title').text(videoInfo.title || 'Spotify Track');
-        const thumbUrl = (videoInfo.videoThumbnails && videoInfo.videoThumbnails.length > 0) ? videoInfo.videoThumbnails[0].url : 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
-        $('#moodtube-widget-cover').attr('src', thumbUrl);
-        
-        currentSpotifyTrackId = null; // Предотвращаем ложное срабатывание авто-скипа старого трека
-        window.isSpotifyPlaylistActive = false;
-        
-        refreshSpotifyToken().then(token => {
-            if (token && spotifyDeviceId) {
-                fetch(`https://api.spotify.com/v1/me/player/play?device_id=${spotifyDeviceId}`, {
-                    method: 'PUT',
-                    body: JSON.stringify({ uris: [videoInfo.videoId] }),
-                    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }
-                }).then(() => {
-                    isCurrentlyPlaying = true;
-                    $('#moodtube-btn-playpause').attr('class', 'fa-solid fa-pause moodtube-ctrl');
-                }).catch(e => console.error(e));
-            } else {
-                toastr.error("Spotify плеер не готов!");
-                playNextInQueue();
-            }
-        });
-        updateQueueUI();
-        
-        // Сбрасываем иконку сердечка
-        $('#moodtube-btn-favorite').removeClass('fa-solid').addClass('fa-regular');
-        return;
-    }
-
     $('#moodtube-widget-title').text(videoInfo.title || 'YouTube Track');
     
     // Подтягиваем картинку и сбрасываем старую для избежания "залипания"
@@ -1260,14 +689,7 @@ async function resolveQueueBackground() {
         for (let i = 0; i < trackQueue.length; i++) {
             let track = trackQueue[i];
             if (!track.videoId && track.originalQuery && !track.searchFailed) {
-                const source = localStorage.getItem('moodtube_playback_source') || 'youtube';
-                let videoInfo = null;
-                if (source === 'spotify') {
-                    videoInfo = await searchSpotify(track.originalQuery);
-                    if (!videoInfo) videoInfo = await searchYouTube(track.originalQuery); // fallback
-                } else {
-                    videoInfo = await searchYouTube(track.originalQuery);
-                }
+                const videoInfo = await searchYouTube(track.originalQuery);
                 if (videoInfo && videoInfo.videoId) {
                     track.videoId = videoInfo.videoId;
                     track.title = videoInfo.title;
@@ -1316,12 +738,6 @@ async function startBackgroundTester() {
                 
                 // Пропускаем тест, если это трек, который УЖЕ играет
                 if (currentQueueIndex === i) {
-                    track.isValidated = true;
-                    continue;
-                }
-                
-                // Пропускаем тест для Spotify треков (у них нет YouTube ID)
-                if (track.videoId.startsWith('spotify:')) {
                     track.isValidated = true;
                     continue;
                 }
@@ -1462,7 +878,6 @@ function clearQueueState(skipSave = false) {
     updateQueueUI(skipSave);
     if (ytPlayer && typeof ytPlayer.stopVideo === 'function') ytPlayer.stopVideo();
     if (audioFallback) { audioFallback.pause(); isUsingAudioFallback = false; }
-    if (typeof spotifyPlayer !== 'undefined' && spotifyPlayer) { try { spotifyPlayer.pause(); } catch(e) {} }
     isCurrentlyPlaying = false;
     $('#moodtube-widget-title').text('No Track Selected');
     $('#moodtube-btn-playpause').attr('class', 'fa-solid fa-play moodtube-ctrl');
@@ -1471,18 +886,14 @@ function clearQueueState(skipSave = false) {
 
 let mtInitialRestoreDone = false;
 
-function restoreQueueCache(attempt = 0, forceNewChatId = false) {
+function restoreQueueCache() {
     const chatId = getActiveChatId();
-    
-    if (!chatId || (forceNewChatId && currentLoadedChatId && chatId === currentLoadedChatId)) {
-        if (attempt < 10) {
-            setTimeout(() => restoreQueueCache(attempt + 1, forceNewChatId), 500);
+    if (!chatId) {
+        if (!mtInitialRestoreDone) {
+            setTimeout(restoreQueueCache, 500);
             return;
         }
-        if (!mtInitialRestoreDone) {
-            mtInitialRestoreDone = true;
-        }
-        clearQueueState(true);
+        clearQueueState();
         return;
     }
 
@@ -1563,8 +974,6 @@ function updateQueueUI(skipSave = false) {
 
     trackQueue.forEach((track, index) => {
         const isCurrent = index === currentQueueIndex;
-        const isSpotifyTrack = track.videoId && track.videoId.startsWith('spotify:');
-        const showSpotifyAdd = isSpotifyTrack && (localStorage.getItem('moodtube_playback_source') === 'spotify');
         const $item = $(`
             <div class="moodtube-queue-item" style="
                 display:flex; align-items:center; gap:10px; padding:8px 10px; 
@@ -1573,37 +982,30 @@ function updateQueueUI(skipSave = false) {
                 border: 1px solid ${isCurrent ? 'var(--mt-accent)' : 'transparent'};
                 transition: 0.2s;
             ">
-                <img src="${(track.videoThumbnails && track.videoThumbnails.length > 0) ? track.videoThumbnails[0].url : (track.videoId && !track.videoId.startsWith('spotify:') ? `https://i.ytimg.com/vi/${track.videoId}/default.jpg` : 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7')}" style="width:30px; height:30px; border-radius:5px; object-fit:cover; flex-shrink:0; ${!track.videoId ? 'background:rgba(255,255,255,0.1);' : ''}">
+                <img src="${track.videoId ? `https://i.ytimg.com/vi/${track.videoId}/default.jpg` : 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7'}" style="width:30px; height:30px; border-radius:5px; object-fit:cover; flex-shrink:0; ${!track.videoId ? 'background:rgba(255,255,255,0.1);' : ''}">
                 <span style="font-size:12px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; flex:1; color:${track.isExhausted ? '#ff6b6b' : (isCurrent ? '#fff' : '#aaa')};">
                     ${track.isExhausted ? '❌ Заблокировано: ' : ''}${track.title}
                 </span>
                 ${isCurrent ? '<i class="fa-solid fa-volume-high" style="color:var(--mt-accent); font-size:10px; margin-right:5px;"></i>' : ''}
-                ${showSpotifyAdd ? '<div class="moodtube-btn-add-playlist moodtube-ctrl" style="width:16px; height:16px; display:flex; justify-content:center; align-items:center; cursor:pointer;" title="Добавить в плейлист Spotify"><i class="fa-solid fa-plus" style="font-size:12px; color:var(--mt-accent);"></i></div>' : ''}
                 <div class="moodtube-btn-dislike moodtube-ctrl" style="width:16px; height:16px; background-color:rgba(235, 120, 120, 0.65); -webkit-mask: url(https://img.icons8.com/ios-filled/50/dislike.png) no-repeat center / contain; mask: url(https://img.icons8.com/ios-filled/50/dislike.png) no-repeat center / contain; cursor:pointer;" title="Не нравится (В бан-лист)"></div>
             </div>
         `);
         
         $item.on('click', (e) => {
-            if ($(e.target).hasClass('moodtube-btn-dislike') || $(e.target).closest('.moodtube-btn-add-playlist').length > 0) return;
+            if ($(e.target).hasClass('moodtube-btn-dislike')) return;
             currentQueueIndex = index;
             playTrack(trackQueue[currentQueueIndex]);
         });
 
-        $item.find('.moodtube-btn-add-playlist').on('click', (e) => {
-            e.stopPropagation();
-            showSpotifyAddToPlaylistMenu(track);
-        });
-
         $item.find('.moodtube-btn-dislike').on('click', (e) => {
             e.stopPropagation();
-            let currentBannedSongs = localStorage.getItem('moodtube_global_banned_songs');
-            if (currentBannedSongs === null) currentBannedSongs = getMtSetting('banned_songs') || '';
+            let currentBannedSongs = getMtSetting('banned_songs');
             const songToBan = `${track.title} ${track.artist || track.Artist || ''}`.trim();
             if (songToBan && !currentBannedSongs.includes(songToBan)) {
                 currentBannedSongs = currentBannedSongs ? currentBannedSongs + ', ' + songToBan : songToBan;
-                localStorage.setItem('moodtube_global_banned_songs', currentBannedSongs);
+                saveMtSetting('banned_songs', currentBannedSongs);
                 $('#moodtube-setting-banned-songs').val(currentBannedSongs);
-                toastr.success(`Трек добавлен в глобальные исключения`);
+                toastr.success(`Трек добавлен в исключения`);
             } else if (currentBannedSongs.includes(songToBan)) {
                 toastr.info(`Трек уже в исключениях`);
             }
@@ -1672,8 +1074,7 @@ async function triggerMoodAnalysisAndPlay() {
         let genre = getMtSetting('genre');
         let scenario = getMtSetting('scenario');
         let banlist = getMtSetting('banlist');
-        let bannedSongs = localStorage.getItem('moodtube_global_banned_songs');
-        if (bannedSongs === null) bannedSongs = getMtSetting('banned_songs') || '';
+        let bannedSongs = getMtSetting('banned_songs');
         let customPrompt = getMtSetting('custom');
         let hardRule = getMtSetting('hard_rule');
         let favoritesList = getMtSetting('favorites');
@@ -1902,7 +1303,7 @@ function handleDrag($el, storageKey) {
     } catch (e) {}
 
     const onStart = (e) => {
-        if ($(e.target).hasClass('moodtube-ctrl') || $(e.target).is('input') || $(e.target).closest('#moodtube-resize-handle').length || $(e.target).closest('#moodtube-queue-list').length || $(e.target).closest('#moodtube-playlists-list').length) return;
+        if ($(e.target).hasClass('moodtube-ctrl') || $(e.target).is('input') || $(e.target).closest('#moodtube-resize-handle').length || $(e.target).closest('#moodtube-queue-list').length) return;
         if (e.type === 'touchstart') e.preventDefault(); // Prevent mobile screen scrolling when dragging the widget
         startX = e.clientX || e.touches?.[0].clientX; startY = e.clientY || e.touches?.[0].clientY;
         const rect = el.getBoundingClientRect();
@@ -2117,21 +1518,12 @@ async function initializeExtension() {
                     <div style="display:flex; align-items:center; gap: 10px;">
                         <span style="font-weight:bold; font-size:14px; color:var(--mt-accent);">Очередь треков</span>
                         <i class="fa-solid fa-trash moodtube-ctrl" id="moodtube-btn-clear-queue" style="cursor:pointer; font-size:12px; color:var(--mt-accent);" title="Очистить очередь"></i>
-                        <i class="fa-solid fa-list-check moodtube-ctrl" id="moodtube-btn-spotify-playlists" style="cursor:pointer; font-size:12px; color:var(--mt-accent); display:none;" title="Мои плейлисты Spotify"></i>
                     </div>
                     <i class="fa-solid fa-chevron-down moodtube-ctrl" id="moodtube-btn-close-queue" style="cursor:pointer; font-size:14px; color:#fff;" title="Скрыть"></i>
                 </div>
                 <div id="moodtube-queue-list" style="flex:1; overflow-y:auto; padding-right:5px;">
                     <div style="font-size:12px; color:#888; text-align:center; padding:10px;">Очередь пуста</div>
                 </div>
-            </div>
-            
-            <div id="moodtube-spotify-playlists-container" style="display:none; position:absolute; top:0; left:0; width:100%; height:100%; background:${BG_COLOR}; z-index:5; padding:15px; box-sizing:border-box; flex-direction:column;">
-                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px; flex-shrink:0;">
-                    <span style="font-weight:bold; font-size:14px; color:var(--mt-accent);">Плейлисты Spotify</span>
-                    <i class="fa-solid fa-chevron-down moodtube-ctrl" id="moodtube-btn-close-playlists" style="cursor:pointer; font-size:14px; color:#fff;" title="Скрыть"></i>
-                </div>
-                <div id="moodtube-playlists-list" style="flex:1; overflow-y:auto; padding-right:5px;"></div>
             </div>
             
             
@@ -2234,13 +1626,13 @@ async function initializeExtension() {
 /* API section */
 .mt-input-field {
     background: var(--mt-bg-input); border: 1px solid var(--mt-border);
-    border-radius: 8px; color: #E5E7EB; padding: 8px 10px;
+    border-radius: 8px; color: #E5E7EB; padding: 10px 12px;
     font-size: 0.85em; outline: none; transition: 0.2s;
     width: 100%; box-sizing: border-box; font-family: inherit;
 }
 .mt-input-field:focus { border-color: var(--mt-accent); background: var(--mt-bg-secondary); }
 .mt-input-field::placeholder { color: #6B7280; }
-.mt-label { display: block; font-size: 0.82em; color: #9CA3AF; margin-bottom: 4px; margin-top: 8px; }
+.mt-label { display: block; font-size: 0.82em; color: #9CA3AF; margin-bottom: 6px; margin-top: 10px; }
 .mt-label:first-child { margin-top: 0; }
 .mt-footer {
     padding: 14px 22px;
@@ -2329,27 +1721,6 @@ async function initializeExtension() {
                                 <i class="fa-solid fa-chevron-down mt-chevron"></i>
                             </div>
                             <div class="mt-cat-content" id="mt-cat-api">
-                                <span class="mt-label" style="margin-top:0;">Источник воспроизведения</span>
-                                <select id="moodtube-playback-source" class="mt-input-field">
-                                    <option value="youtube">YouTube (По умолчанию)</option>
-                                    <option value="spotify">Spotify (Premium SDK)</option>
-                                </select>
-                                
-                                <div id="moodtube-spotify-settings" style="display:none; padding: 10px; background: rgba(0,0,0,0.2); border-radius: 8px; margin-top: 10px; border: 1px solid var(--mt-border);">
-                                    <span class="mt-label" style="margin-top:0; color:var(--mt-accent);"><i class="fa-brands fa-spotify"></i> Spotify Настройки</span>
-                                    <span class="mt-label">Client ID</span>
-                                    <input type="text" id="moodtube-spotify-client-id" class="mt-input-field" placeholder="Client ID">
-                                    <span class="mt-label" style="margin-top:8px;">Точный Redirect URI (скопируйте в Dashboard)</span>
-                                    <div style="display:flex; gap: 8px; margin-top:4px;">
-                                        <input type="text" id="moodtube-spotify-redirect-show" class="mt-input-field" readonly style="flex:1; background:rgba(0,0,0,0.4); color:#9CA3AF;">
-                                        <button id="moodtube-btn-copy-redirect" class="mt-btn-test" style="margin-top:0; width:auto; padding: 8px 12px;" title="Скопировать"><i class="fa-regular fa-copy"></i></button>
-                                    </div>
-                                    <button id="moodtube-btn-spotify-auth" class="mt-btn-test" style="margin-top: 10px;">Авторизоваться</button>
-                                    <div id="moodtube-spotify-status" style="margin-top: 8px; font-size: 0.85em; color: #9CA3AF;"></div>
-                                </div>
-                                
-                                <hr style="border:0; border-top:1px solid rgba(255,255,255,0.05); margin:15px 0;">
-
                                 <span class="mt-label" style="margin-top:0;">Количество треков для генерации за раз</span>
                                 <input type="number" id="moodtube-bulk-count" value="10" min="1" max="30" class="mt-input-field" style="width: 100px;">
                                 
@@ -2719,52 +2090,6 @@ async function initializeExtension() {
             if (fabEnabled) $fab.show(); else $fab.hide();
         }, 200);
         
-        // --- Spotify Init ---
-        handleSpotifyCallback();
-        window.addEventListener('storage', (e) => {
-            if (e.key === 'moodtube_spotify_token' && e.newValue) {
-                toastr.success("Spotify успешно подключен!");
-                $('#moodtube-spotify-status').html('<span style="color:#1DB954;">Авторизован ✓</span>');
-                $('#moodtube-btn-spotify-auth').text('Переавторизоваться');
-                if ($('#moodtube-playback-source').val() === 'spotify') initSpotifyPlayer();
-            }
-        });
-        const source = localStorage.getItem('moodtube_playback_source') || 'youtube';
-        if (source === 'spotify') initSpotifyPlayer();
-        
-        $('#moodtube-playback-source').on('change', function() {
-            if ($(this).val() === 'spotify') $('#moodtube-spotify-settings').slideDown();
-            else $('#moodtube-spotify-settings').slideUp();
-        });
-        
-        $('#moodtube-btn-spotify-auth').off('click').on('click', () => {
-            $('#moodtube-btn-spotify-auth').prop('disabled', true);
-            authSpotify();
-            setTimeout(() => $('#moodtube-btn-spotify-auth').prop('disabled', false), 2000);
-        });
-        
-        $('#moodtube-spotify-redirect-show').val(window.location.origin + '/');
-        $('#moodtube-btn-copy-redirect').off('click').on('click', () => {
-            const uri = window.location.origin + '/';
-            if (navigator.clipboard && window.isSecureContext) {
-                navigator.clipboard.writeText(uri).then(() => toastr.success("Redirect URI скопирован!"));
-            } else {
-                const textArea = document.createElement("textarea");
-                textArea.value = uri;
-                textArea.style.position = "fixed";
-                textArea.style.left = "-9999px";
-                document.body.appendChild(textArea);
-                textArea.select();
-                try {
-                    document.execCommand('copy');
-                    toastr.success("Redirect URI скопирован (Fallback)!");
-                } catch (err) {
-                    toastr.error("Копирование заблокировано браузером (нужен HTTPS). Скопируйте вручную из поля.");
-                }
-                document.body.removeChild(textArea);
-            }
-        });
-        
         $('<style>.moodtube-no-select { user-select: none !important; }</style>').appendTo('head');
 
         // Синхронизация иконки FAB с главной кнопкой
@@ -2782,31 +2107,8 @@ async function initializeExtension() {
         observerBtn.observe($('#moodtube-btn-playpause')[0], { attributes: true });
 
 
-        $('#moodtube-btn-playpause').on('click', async () => {
-            const source = localStorage.getItem('moodtube_playback_source') || 'youtube';
-            if (source === 'spotify') {
-                const wasPlaying = isCurrentlyPlaying;
-                if (spotifyPlayer && isSpotifyReady) {
-                    if (wasPlaying) spotifyPlayer.pause();
-                    else spotifyPlayer.resume();
-                }
-                const token = await refreshSpotifyToken();
-                if (token) {
-                    if (wasPlaying) {
-                        fetch('https://api.spotify.com/v1/me/player/pause', { method: 'PUT', headers: { Authorization: `Bearer ${token}` } })
-                            .then(res => { if (!res.ok) res.json().then(data => toastr.error("Spotify: " + (data.error?.message || "Ошибка паузы"))); })
-                            .catch(()=>{});
-                        isCurrentlyPlaying = false;
-                        $('#moodtube-btn-playpause').attr('class', 'fa-solid fa-play moodtube-ctrl');
-                    } else {
-                        fetch('https://api.spotify.com/v1/me/player/play', { method: 'PUT', headers: { Authorization: `Bearer ${token}` } })
-                            .then(res => { if (!res.ok) res.json().then(data => toastr.error("Spotify: " + (data.error?.message || "Ошибка воспроизведения"))); })
-                            .catch(()=>{});
-                        isCurrentlyPlaying = true;
-                        $('#moodtube-btn-playpause').attr('class', 'fa-solid fa-pause moodtube-ctrl');
-                    }
-                }
-            } else if (isUsingAudioFallback && audioFallback) {
+        $('#moodtube-btn-playpause').on('click', () => {
+            if (isUsingAudioFallback && audioFallback) {
                 if (isCurrentlyPlaying) audioFallback.pause();
                 else audioFallback.play();
             } else if (ytPlayer) {
@@ -2815,27 +2117,10 @@ async function initializeExtension() {
             }
         });
 
-        $('#moodtube-btn-next').on('click', async () => {
-            const source = localStorage.getItem('moodtube_playback_source') || 'youtube';
-            if (source === 'spotify' && window.isSpotifyPlaylistActive) {
-                const token = await refreshSpotifyToken();
-                if (token) fetch('https://api.spotify.com/v1/me/player/next', { method: 'POST', headers: { Authorization: `Bearer ${token}` } }).catch(()=>{});
-                return;
-            }
-            playNextInQueue();
-        });
-
-        $('#moodtube-btn-prev').on('click', async () => {
-            const source = localStorage.getItem('moodtube_playback_source') || 'youtube';
-            if (source === 'spotify' && window.isSpotifyPlaylistActive) {
-                const token = await refreshSpotifyToken();
-                if (token) fetch('https://api.spotify.com/v1/me/player/previous', { method: 'POST', headers: { Authorization: `Bearer ${token}` } }).catch(()=>{});
-                return;
-            }
-            playPrevInQueue();
-        });
+        $('#moodtube-btn-next').on('click', playNextInQueue);
+        $('#moodtube-btn-prev').on('click', playPrevInQueue);
         
-        $('#moodtube-btn-favorite').on('click', async () => {
+        $('#moodtube-btn-favorite').on('click', () => {
             if (currentQueueIndex >= 0 && currentQueueIndex < trackQueue.length) {
                 const track = trackQueue[currentQueueIndex];
                 const trackName = `${track.title} ${track.artist || track.Artist || ''}`.trim();
@@ -2847,30 +2132,9 @@ async function initializeExtension() {
                     $('#moodtube-setting-favorites-list').val(favList);
                     
                     $('#moodtube-btn-favorite').removeClass('fa-regular').addClass('fa-solid');
-                    toastr.success(`Трек добавлен в Избранное (ИИ)`);
+                    toastr.success(`Трек добавлен в Избранное`);
                 } else {
-                    toastr.info(`Трек уже в Избранном (ИИ)`);
-                }
-                
-                const source = localStorage.getItem('moodtube_playback_source') || 'youtube';
-                if (source === 'spotify' && track.videoId && track.videoId.startsWith('spotify:track:')) {
-                    const spotifyId = track.videoId.split(':')[2];
-                    const token = await refreshSpotifyToken();
-                    if (token) {
-                        try {
-                            const uriParam = encodeURIComponent(`spotify:track:${spotifyId}`);
-                            const res = await fetch(`https://api.spotify.com/v1/me/library?uris=${uriParam}`, {
-                                method: 'PUT',
-                                headers: { Authorization: `Bearer ${token}` }
-                            });
-                            if (res.ok) {
-                                toastr.success("Трек сохранен в любимые Spotify");
-                            } else {
-                                const err = await res.json().catch(()=>({}));
-                                toastr.error("Spotify: " + (err.error?.message || "Ошибка сохранения в любимые"));
-                            }
-                        } catch(e) { console.error(e); }
-                    }
+                    toastr.info(`Трек уже в Избранном`);
                 }
             } else {
                 toastr.warning(`Нет активного трека`);
@@ -2892,22 +2156,7 @@ async function initializeExtension() {
             let current = 0;
             let total = 0;
             
-            if (localStorage.getItem('moodtube_playback_source') === 'spotify' && typeof spotifyPlayer !== 'undefined' && spotifyPlayer) {
-                spotifyPlayer.getCurrentState().then(state => {
-                    if (state) {
-                        const current = state.position / 1000;
-                        const total = state.duration / 1000;
-                        if (total > 0) {
-                            $('#moodtube-time-current').text(formatTime(current));
-                            $('#moodtube-time-total').text(formatTime(total));
-                            if (!$('#moodtube-progress-slider').is(':active')) {
-                                $('#moodtube-progress-slider').val((current / total) * 100);
-                            }
-                        }
-                    }
-                });
-                return;
-            } else if (isUsingAudioFallback && audioFallback) {
+            if (isUsingAudioFallback && audioFallback) {
                 current = audioFallback.currentTime || 0;
                 total = audioFallback.duration || 0;
             } else if (ytPlayer && typeof ytPlayer.getCurrentTime === 'function' && typeof ytPlayer.getDuration === 'function') {
@@ -2924,19 +2173,12 @@ async function initializeExtension() {
             }
         }, 1000);
 
+        // Перемотка трека
         $('#moodtube-progress-slider').on('input change', function() {
             const val = $(this).val();
             let total = 0;
-            const source = localStorage.getItem('moodtube_playback_source') || 'youtube';
             
-            if (source === 'spotify' && typeof spotifyPlayer !== 'undefined' && spotifyPlayer) {
-                spotifyPlayer.getCurrentState().then(state => {
-                    if (state) {
-                        total = state.duration;
-                        if (total > 0) spotifyPlayer.seek((val / 100) * total);
-                    }
-                });
-            } else if (isUsingAudioFallback && audioFallback) {
+            if (isUsingAudioFallback && audioFallback) {
                 total = audioFallback.duration || 0;
                 if (total > 0) audioFallback.currentTime = (val / 100) * total;
             } else if (ytPlayer && typeof ytPlayer.getDuration === 'function' && typeof ytPlayer.seekTo === 'function') {
@@ -2949,9 +2191,6 @@ async function initializeExtension() {
             $('#moodtube-inner-content').hide();
             $('#moodtube-btn-close').hide();
             $('#moodtube-queue-container').css('display', 'flex');
-            const source = localStorage.getItem('moodtube_playback_source') || 'youtube';
-            if (source === 'spotify') $('#moodtube-btn-spotify-playlists').show();
-            else $('#moodtube-btn-spotify-playlists').hide();
             updateQueueUI();
         });
 
@@ -2959,15 +2198,6 @@ async function initializeExtension() {
             $('#moodtube-queue-container').hide();
             $('#moodtube-inner-content').css('display', '');
             $('#moodtube-btn-close').show();
-        });
-
-        $('#moodtube-btn-spotify-playlists').on('click', () => {
-            showSpotifyPlaylists();
-        });
-
-        $('#moodtube-btn-close-playlists').on('click', () => {
-            $('#moodtube-spotify-playlists-container').hide();
-            $('#moodtube-queue-container').css('display', 'flex');
         });
 
         $('#moodtube-btn-clear-queue').on('click', () => {
@@ -3139,22 +2369,10 @@ async function initializeExtension() {
 
             // Load plain inputs
             $('#moodtube-setting-theme').val(localStorage.getItem('moodtube_theme') || 'blue');
-            $('#moodtube-playback-source').val(localStorage.getItem('moodtube_playback_source') || 'youtube').trigger('change');
-            $('#moodtube-spotify-client-id').val(localStorage.getItem('moodtube_spotify_client_id') || '');
-            const spotToken = localStorage.getItem('moodtube_spotify_token');
-            if (spotToken) {
-                $('#moodtube-spotify-status').html('<span style="color:#1DB954;">Авторизован ✓</span>');
-                $('#moodtube-btn-spotify-auth').text('Переавторизоваться');
-            } else {
-                $('#moodtube-spotify-status').html('Не авторизован');
-                $('#moodtube-btn-spotify-auth').text('Авторизоваться в Spotify');
-            }
             $('#moodtube-bulk-count').val(localStorage.getItem('moodtube_ai_bulk_count') || '10');
             $('#moodtube-setting-fab').prop('checked', localStorage.getItem('moodtube_fab_enable') !== 'false');
             
-            let bs = localStorage.getItem('moodtube_global_banned_songs');
-            if (bs === null) bs = getMtSetting('banned_songs') || '';
-            $('#moodtube-setting-banned-songs').val(bs);
+            $('#moodtube-setting-banned-songs').val(getMtSetting('banned_songs'));
             $('#moodtube-setting-banlist').val(getMtSetting('banlist'));
             $('#moodtube-setting-favorites-list').val(getMtSetting('favorites'));
             $('#moodtube-setting-favorites-context').prop('checked', getMtSetting('favorites_context') === 'true');
@@ -3216,11 +2434,6 @@ async function initializeExtension() {
             localStorage.setItem('moodtube_theme', theme);
             applyTheme(theme);
             
-            const source = $('#moodtube-playback-source').val();
-            localStorage.setItem('moodtube_playback_source', source);
-            localStorage.setItem('moodtube_spotify_client_id', $('#moodtube-spotify-client-id').val().trim());
-            if (source === 'spotify') initSpotifyPlayer();
-            
             const fabEnabled = $('#moodtube-setting-fab').is(':checked');
             localStorage.setItem('moodtube_fab_enable', fabEnabled ? 'true' : 'false');
             if (fabEnabled) $('#moodtube-fab').show(); else $('#moodtube-fab').hide();
@@ -3243,7 +2456,7 @@ async function initializeExtension() {
             saveMtSetting('scenario', scenarioTags.join(', '));
 
             saveMtSetting('banlist', $('#moodtube-setting-banlist').val().trim());
-            localStorage.setItem('moodtube_global_banned_songs', $('#moodtube-setting-banned-songs').val().trim());
+            saveMtSetting('banned_songs', $('#moodtube-setting-banned-songs').val().trim());
             saveMtSetting('favorites', $('#moodtube-setting-favorites-list').val().trim());
             saveMtSetting('favorites_context', $('#moodtube-setting-favorites-context').is(':checked') ? 'true' : 'false');
             saveMtSetting('hard_rule', $('#moodtube-setting-hard-rule').val().trim());
@@ -3260,22 +2473,20 @@ async function initializeExtension() {
 
         if (typeof eventSource !== 'undefined' && typeof event_types !== 'undefined') {
             eventSource.on(event_types.CHAT_CHANGED, () => {
-                restoreQueueCache(0, true);
                 setTimeout(() => {
+                    restoreQueueCache();
                     if ($('#mt-settings-modal').is(':visible')) {
                         $('#moodtube-btn-settings').trigger('click');
                     }
                 }, 200);
             });
             eventSource.on(event_types.CHAT_CLOSED, () => {
-                if (!getActiveChatId()) {
-                    currentLoadedChatId = null;
-                    clearQueueState(true);
-                    const $fab = $('#moodtube-fab');
-                    if ($fab.length && !$fab.parent().is('body')) {
-                        restoreFabStandalone($fab);
-                        $('body').append($fab);
-                    }
+                currentLoadedChatId = null;
+                clearQueueState(true);
+                const $fab = $('#moodtube-fab');
+                if ($fab.length && !$fab.parent().is('body')) {
+                    restoreFabStandalone($fab);
+                    $('body').append($fab);
                 }
             });
         }
@@ -3289,7 +2500,6 @@ async function initializeExtension() {
             }
             if (audioFallback) {
                 audioFallback.volume = currentVolume / 100;
-                if (typeof spotifyPlayer !== 'undefined' && spotifyPlayer) spotifyPlayer.setVolume(currentVolume / 100);
             }
         });
         
