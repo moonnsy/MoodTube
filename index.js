@@ -1471,12 +1471,15 @@ function clearQueueState(skipSave = false) {
 
 let mtInitialRestoreDone = false;
 
-function restoreQueueCache() {
+function restoreQueueCache(attempt = 0) {
     const chatId = getActiveChatId();
     if (!chatId) {
-        if (!mtInitialRestoreDone) {
-            setTimeout(restoreQueueCache, 500);
+        if (attempt < 10) {
+            setTimeout(() => restoreQueueCache(attempt + 1), 500);
             return;
+        }
+        if (!mtInitialRestoreDone) {
+            mtInitialRestoreDone = true;
         }
         clearQueueState(true);
         return;
