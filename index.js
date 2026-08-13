@@ -1130,7 +1130,11 @@ function playAudioStream(track, streamUrl, index) {
 
 async function playTrack(videoInfo) {
     if (!videoInfo || (!videoInfo.videoId && !videoInfo.streamUrl)) return;
-    
+
+    window.dispatchEvent(new CustomEvent('moodtube:trackchange', {
+        detail: { title: videoInfo.title, videoId: videoInfo.videoId }
+    }));
+
     // Check if we have a cached Blob first!
     if (videoInfo.videoId && !videoInfo.streamUrl) {
         const cachedBlob = await getMp3FromCache(videoInfo.videoId);
@@ -1142,6 +1146,9 @@ async function playTrack(videoInfo) {
     }
 
     // Explicitly stop any playing media to prevent overlapping
+    if (typeof spotifyPlayer !== 'undefined' && spotifyPlayer && isSpotifyReady) {
+        try { spotifyPlayer.pause(); } catch(e) {}
+    }
     if (ytPlayer && typeof ytPlayer.stopVideo === 'function') {
         try { ytPlayer.stopVideo(); } catch(e) {}
     }
@@ -1187,9 +1194,13 @@ async function playTrack(videoInfo) {
                     method: 'PUT',
                     body: JSON.stringify({ uris: [videoInfo.videoId] }),
                     headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }
-                }).then(() => {
-                    isCurrentlyPlaying = true;
-                    $('#moodtube-btn-playpause').attr('class', 'fa-solid fa-pause moodtube-ctrl');
+                }).then(res => {
+                    if (res.ok) {
+                        isCurrentlyPlaying = true;
+                        $('#moodtube-btn-playpause').attr('class', 'fa-solid fa-pause moodtube-ctrl');
+                    } else {
+                        res.json().then(data => toastr.error("Spotify: " + (data.error?.message || "Ошибка API"))).catch(()=>{});
+                    }
                 }).catch(e => console.error(e));
             } else {
                 toastr.error("Spotify плеер не готов!");
@@ -2892,8 +2903,6 @@ async function initializeExtension() {
 
         // Обновление прогресс-бара
         setInterval(() => {
-            if (!isCurrentlyPlaying) return;
-            
             let current = 0;
             let total = 0;
             
@@ -2908,11 +2917,22 @@ async function initializeExtension() {
                             if (!$('#moodtube-progress-slider').is(':active')) {
                                 $('#moodtube-progress-slider').val((current / total) * 100);
                             }
+                            if (!window.isSpotifyPlaylistActive && !window.mtSkipTimeout && current > 0 && total - current <= 1.5 && !state.paused) {
+                                window.mtSkipTimeout = true;
+                                setTimeout(() => window.mtSkipTimeout = false, 5000);
+                                isCurrentlyPlaying = false;
+                                try { spotifyPlayer.pause(); } catch(e){}
+                                setTimeout(playNextInQueue, 300);
+                            }
                         }
                     }
                 });
                 return;
-            } else if (isUsingAudioFallback && audioFallback) {
+            }
+            
+            if (!isCurrentlyPlaying) return;
+
+            if (isUsingAudioFallback && audioFallback) {
                 current = audioFallback.currentTime || 0;
                 total = audioFallback.duration || 0;
             } else if (ytPlayer && typeof ytPlayer.getCurrentTime === 'function' && typeof ytPlayer.getDuration === 'function') {
@@ -3340,3 +3360,98 @@ async function initializeExtension() {
 }
 
 $(document).ready(() => { setTimeout(initializeExtension, 1500); });
+
+// ============================================================
+//  Публичный API для сторонних расширений (NOVA / Link).
+//  Только новые функции — существующий код не изменяется.
+// ============================================================
+
+function enqueueMany(queries) {
+    if (!Array.isArray(queries)) queries = [queries];
+    queries
+        .filter(q => typeof q === 'string' && q.trim())
+        .forEach(q => enqueueQuery(q.trim()));
+}
+
+function getCurrentTrack() {
+    return trackQueue[currentQueueIndex] || null;
+}
+
+function isPlaying() {
+    return isCurrentlyPlaying;
+}
+
+// Кнопки дёргаем через их собственные обработчики — своей копии логики нет,
+// поэтому расходиться с UI тут нечему.
+function togglePlayPause() { $('#moodtube-btn-playpause').trigger('click'); }
+function skipNext()        { $('#moodtube-btn-next').trigger('click'); }
+function skipPrev()        { $('#moodtube-btn-prev').trigger('click'); }
+
+function seekTo(seconds) {
+    seconds = Number(seconds);
+    if (!isFinite(seconds) || seconds < 0) return false;
+
+    const source = localStorage.getItem('moodtube_playback_source') || 'youtube';
+    if (source === 'spotify' && typeof spotifyPlayer !== 'undefined' && spotifyPlayer) {
+        spotifyPlayer.seek(seconds * 1000);
+    } else if (isUsingAudioFallback && audioFallback) {
+        audioFallback.currentTime = seconds;
+    } else if (ytPlayer && typeof ytPlayer.seekTo === 'function') {
+        ytPlayer.seekTo(seconds, true);
+    } else {
+        return false;
+    }
+    return true;
+}
+
+// Играет немедленно, в обход очереди: трек встаёт сразу после текущего.
+async function playQuery(query) {
+    if (typeof query !== 'string' || !query.trim()) return false;
+    query = query.trim();
+
+    const source = localStorage.getItem('moodtube_playback_source') || 'youtube';
+    let videoInfo = source === 'spotify'
+        ? (await searchSpotify(query) || await searchYouTube(query))
+        : await searchYouTube(query);
+
+    if (!videoInfo || !videoInfo.videoId) return false;
+
+    const trackObj = {
+        title: videoInfo.title,
+        originalQuery: query,
+        videoId: videoInfo.videoId,
+        videoThumbnails: videoInfo.videoThumbnails,
+        isValidated: true
+    };
+    if (videoInfo.streamUrl) {
+        trackObj.streamUrl = videoInfo.streamUrl;
+        trackObj.isFallback = true;
+    }
+
+    const insertAt = Math.max(currentQueueIndex, -1) + 1;
+    trackQueue.splice(insertAt, 0, trackObj);
+    currentQueueIndex = insertAt;
+    updateQueueUI();
+    playTrack(trackObj);
+    return true;
+}
+
+$(document).ready(() => {
+    setTimeout(() => {
+        window.MoodTubeAPI = {
+            version: 4,
+            enqueueQuery,
+            enqueueMany,
+            playTrack,
+            playQuery,
+            getCurrentTrack,
+            togglePlayPause,
+            skipNext,
+            skipPrev,
+            isPlaying,
+            seekTo,
+        };
+        window.dispatchEvent(new CustomEvent('moodtube:ready', { detail: window.MoodTubeAPI }));
+        console.log(`${LOG_PREFIX} MoodTubeAPI v4 готов`);
+    }, 1600);
+});
