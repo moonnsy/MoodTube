@@ -204,6 +204,63 @@ async function getInvidiousInstances() {
     }
 }
 
+// --- ДИАГНОСТИКА ПОИСКА (видна на экране — удобно на телефоне без консоли) ---
+function mtCheckImage(url, timeoutMs = 6000) {
+    return new Promise(resolve => {
+        const img = new Image();
+        const t = setTimeout(() => { img.src = ''; resolve(false); }, timeoutMs);
+        img.onload = () => { clearTimeout(t); resolve(img.naturalWidth > 0); };
+        img.onerror = () => { clearTimeout(t); resolve(false); };
+        img.src = url + (url.includes('?') ? '&' : '?') + '_mt=' + Date.now();
+    });
+}
+
+async function runSearchDiagnostics() {
+    const lines = [];
+    const add = (ok, text) => lines.push({ ok, text });
+    const testQuery = encodeURIComponent('Nirvana Smells Like Teen Spirit');
+
+    add(navigator.onLine, `Сеть браузера: ${navigator.onLine ? 'онлайн' : 'ОФЛАЙН'}`);
+    add(!!(window.YT && window.YT.Player), `YouTube-плеер (youtube.com/iframe_api): ${window.YT && window.YT.Player ? 'загружен' : 'НЕ загрузился — youtube.com недоступен с этого устройства'}`);
+    add(await mtCheckImage('https://i.ytimg.com/vi/hTWKbfoikeg/default.jpg'), 'Обложки (i.ytimg.com)');
+
+    const pipedResults = await Promise.all(PIPED_INSTANCES.map(async url => {
+        try {
+            const r = await fetchWithTimeout(`${url}/search?q=${testQuery}&filter=all`, {}, 6000);
+            if (!r.ok) return false;
+            const d = await r.json();
+            return Array.isArray(d.items) && d.items.length > 0;
+        } catch (e) { return false; }
+    }));
+    const pipedOk = pipedResults.filter(Boolean).length;
+    add(pipedOk > 0, `Поиск Piped: работает ${pipedOk} из ${PIPED_INSTANCES.length} зеркал`);
+
+    let invOk = 0, invTotal = 0;
+    try {
+        const instances = (await getInvidiousInstances()).slice(0, 6);
+        invTotal = instances.length;
+        const res = await Promise.all(instances.map(async url => {
+            try {
+                const r = await fetchWithTimeout(`${url}/api/v1/search?q=${testQuery}&type=video`, {}, 6000);
+                if (!r.ok) return false;
+                const d = await r.json();
+                return Array.isArray(d) && d.length > 0;
+            } catch (e) { return false; }
+        }));
+        invOk = res.filter(Boolean).length;
+    } catch (e) {}
+    add(invOk > 0, `Поиск Invidious: работает ${invOk} из ${invTotal} зеркал`);
+
+    const searchOk = pipedOk > 0 || invOk > 0;
+    let verdict;
+    if (!navigator.onLine) verdict = 'Устройство не в сети.';
+    else if (!searchOk && !(window.YT && window.YT.Player)) verdict = 'С этого устройства недоступны ни YouTube, ни зеркала поиска. Почти наверняка это блокировка у провайдера/мобильной сети, а не баг расширения — нужен VPN на этом устройстве (или та же сеть, что у компьютера).';
+    else if (!searchOk) verdict = 'Зеркала поиска недоступны с этого устройства (блокировка сети или зеркала временно лежат). Попробуйте VPN или повторите позже.';
+    else if (!(window.YT && window.YT.Player)) verdict = 'Поиск работает, но YouTube-плеер не загрузился — треки найдутся, но играть будут только через запасной аудио-поток (если он доступен). Нужен доступ к youtube.com (VPN).';
+    else verdict = 'Поиск и плеер доступны. Если DJ всё равно ничего не ищет — проблема в шаге ИИ: нажмите «Проверить соединение» выше и посмотрите выбранный профиль на этом устройстве.';
+    return { lines, verdict };
+}
+
 async function getPipedStream(videoId) {
     try {
         const promises = PIPED_INSTANCES.map(async url => {
@@ -1101,12 +1158,7 @@ function playAudioStream(track, streamUrl, index) {
     $('#moodtube-widget-title').text(track.title);
     
     // Сбрасываем и устанавливаем обложку (из поиска или дефолт)
-    $('#moodtube-widget-cover').attr('src', 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7');
-    if (track.videoThumbnails && track.videoThumbnails.length > 0) {
-        $('#moodtube-widget-cover').attr('src', track.videoThumbnails[0].url);
-    } else if (track.videoId) {
-        $('#moodtube-widget-cover').attr('src', `https://i.ytimg.com/vi/${track.videoId}/mqdefault.jpg`);
-    }
+    setImgWithFallback(document.getElementById('moodtube-widget-cover'), getTrackThumbCandidates(track));
     
     updateQueueUI();
     
@@ -1294,6 +1346,7 @@ async function resolveQueueBackground() {
                     delete track.isSearching;
                     track.title = "❌ Не найдено: " + track.originalQuery;
                     updateQueueUI();
+                    toastr.warning('MoodTube: трек не найден — возможно, зеркала поиска недоступны с этого устройства. Настройки → API → «Диагностика поиска треков».', '', { preventDuplicates: true });
                     if (currentQueueIndex === i) {
                         playNextInQueue();
                     }
@@ -1511,13 +1564,7 @@ function restoreQueueCache() {
         if (currentQueueIndex >= 0 && currentQueueIndex < trackQueue.length) {
             const track = trackQueue[currentQueueIndex];
             $('#moodtube-widget-title').text(track.title || 'YouTube Track');
-            if (track.videoThumbnails && track.videoThumbnails.length > 0) {
-                $('#moodtube-widget-cover').attr('src', track.videoThumbnails[0].url);
-            } else if (track.videoId) {
-                $('#moodtube-widget-cover').attr('src', `https://i.ytimg.com/vi/${track.videoId}/mqdefault.jpg`);
-            } else {
-                $('#moodtube-widget-cover').attr('src', 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7');
-            }
+            setImgWithFallback(document.getElementById('moodtube-widget-cover'), getTrackThumbCandidates(track));
             if (ytPlayer && typeof ytPlayer.stopVideo === 'function') ytPlayer.stopVideo();
             if (audioFallback) { audioFallback.pause(); isUsingAudioFallback = false; }
             isCurrentlyPlaying = false;
@@ -1555,6 +1602,36 @@ function restoreQueueCache() {
     }
 }
 
+const MT_EMPTY_IMG = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
+
+// Обложка трека: для YouTube сначала берём i.ytimg.com по videoId (прокси зеркал Piped/Invidious часто лежат),
+// затем — картинки из ответа поиска. При ошибке загрузки <img> переходит к следующему варианту.
+function getTrackThumbCandidates(track, size = 'mqdefault') {
+    const list = [];
+    if (!track) return list;
+    const id = track.videoId;
+    if (id && !String(id).startsWith('spotify:')) {
+        list.push(`https://i.ytimg.com/vi/${id}/${size}.jpg`);
+        if (size !== 'hqdefault') list.push(`https://i.ytimg.com/vi/${id}/hqdefault.jpg`);
+    }
+    (track.videoThumbnails || []).forEach(t => { if (t && t.url && !list.includes(t.url)) list.push(t.url); });
+    return list;
+}
+
+function setImgWithFallback(img, candidates) {
+    if (!img) return;
+    const queue = (candidates || []).slice();
+    let current = queue.length ? queue.shift() : MT_EMPTY_IMG;
+    img.onerror = () => {
+        // src поменял другой код (новый трек и т.п.) — старую цепочку не продолжаем
+        if (img.getAttribute('src') !== current) return;
+        current = queue.length ? queue.shift() : MT_EMPTY_IMG;
+        if (current === MT_EMPTY_IMG) img.onerror = null;
+        img.src = current;
+    };
+    img.src = current;
+}
+
 function mtEscapeHtml(str) {
     return String(str ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
@@ -1574,14 +1651,13 @@ function updateQueueUI(skipSave = false) {
         const isCurrent = index === currentQueueIndex;
         const isSpotifyTrack = track.videoId && track.videoId.startsWith('spotify:');
         const showSpotifyAdd = isSpotifyTrack && (localStorage.getItem('moodtube_playback_source') === 'spotify');
-        const thumbUrl = (track.videoThumbnails && track.videoThumbnails.length > 0) ? track.videoThumbnails[0].url : (track.videoId && !track.videoId.startsWith('spotify:') ? `https://i.ytimg.com/vi/${track.videoId}/default.jpg` : 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7');
         const itemClasses = ['moodtube-queue-item', 'mt-queue-item'];
         if (isCurrent) itemClasses.push('mt-is-current');
         if (track.isExhausted) itemClasses.push('mt-is-blocked');
         if (track.isSearching) itemClasses.push('mt-is-searching');
         const $item = $(`
             <div class="${itemClasses.join(' ')}">
-                <img class="mt-queue-thumb${!track.videoId ? ' mt-is-empty' : ''}" src="${mtEscapeHtml(thumbUrl)}">
+                <img class="mt-queue-thumb${!track.videoId ? ' mt-is-empty' : ''}" alt="">
                 <span class="mt-queue-title">${track.isExhausted ? '❌ Заблокировано: ' : ''}${mtEscapeHtml(track.title)}</span>
                 ${isCurrent ? '<i class="fa-solid fa-volume-high mt-queue-now"></i>' : ''}
                 ${showSpotifyAdd ? '<div class="moodtube-btn-add-playlist moodtube-ctrl mt-queue-add" title="Добавить в плейлист Spotify"><i class="fa-solid fa-plus"></i></div>' : ''}
@@ -1589,6 +1665,8 @@ function updateQueueUI(skipSave = false) {
             </div>
         `);
         
+        setImgWithFallback($item.find('.mt-queue-thumb')[0], getTrackThumbCandidates(track, 'default'));
+
         $item.on('click', (e) => {
             if ($(e.target).hasClass('moodtube-btn-dislike') || $(e.target).closest('.moodtube-btn-add-playlist').length > 0) return;
             currentQueueIndex = index;
@@ -2993,6 +3071,8 @@ async function initializeExtension() {
                                     <button id="moodtube-btn-sync-profiles" class="mt-btn-test" style="margin-top: 0; width: auto; padding: 8px 12px;" title="Синхронизировать"><i class="fa-solid fa-arrows-rotate"></i></button>
                                 </div>
                                 <button id="moodtube-btn-test-profile" class="mt-btn-test" style="margin-top: 10px;">Проверить соединение</button>
+                                <button id="moodtube-btn-diagnose-search" class="mt-btn-test" style="margin-top: 10px;"><i class="fa-solid fa-stethoscope"></i> Диагностика поиска треков</button>
+                                <div id="moodtube-diagnose-result" style="display:none; margin-top:8px; padding:10px; border-radius:8px; border:1px solid var(--mt-border); background:rgba(0,0,0,0.2); font-size:0.82em; line-height:1.5;"></div>
                             </div>
                         </div>
 
@@ -3764,6 +3844,22 @@ async function initializeExtension() {
                 toastr.error(`Ошибка сети: ${e.message}`);
             } finally {
                 $('#moodtube-btn-test-profile').text(oldText).prop('disabled', false);
+            }
+        });
+
+        $('#moodtube-btn-diagnose-search').on('click', async function() {
+            const $btn = $(this), $out = $('#moodtube-diagnose-result');
+            $btn.prop('disabled', true).html('<i class="fa-solid fa-spinner fa-spin"></i> Проверяю…');
+            $out.show().text('Проверка займёт до ~10 секунд…');
+            try {
+                const { lines, verdict } = await runSearchDiagnostics();
+                $out.empty();
+                lines.forEach(l => $('<div>').text(`${l.ok ? '✅' : '❌'} ${l.text}`).appendTo($out));
+                $('<div style="margin-top:8px; font-weight:bold;">').text(verdict).appendTo($out);
+            } catch (e) {
+                $out.text('Ошибка диагностики: ' + (e.message || e));
+            } finally {
+                $btn.prop('disabled', false).html('<i class="fa-solid fa-stethoscope"></i> Диагностика поиска треков');
             }
         });
 
