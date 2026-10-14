@@ -60,3 +60,48 @@
 
 **Бан-лист:**
 Если вам категорически не нравится песня или исполнитель, просто нажмите <img width="20" height="20" src="https://img.icons8.com/ios-filled/50/8db7d5/dislike.png" alt="dislike" style="vertical-align: middle;"/> в очереди. Трек мгновенно отправится в исключения, и ИИ больше никогда вам его не включит!
+
+---
+
+## 🎨 Свои темы (Custom)
+
+Выберите в настройках «Интерфейс → Тема оформления → **Custom**». Там можно задать цвета, картинки, подписи и свой CSS, а потом выгрузить всё одним `.json` и загрузить обратно. Импорт также понимает JSON-темы самой SillyTavern: из них берутся `custom_css` и основные цвета.
+
+**Формат файла**
+```json
+{
+    "type": "moodtube_theme",
+    "version": 2,
+    "name": "Cupid",
+    "vars":   { "accent": "#ff7aa8", "accent_hover": "#ff9cbf", "bg_primary": "rgba(40,20,30,.9)", "bg_secondary": "...", "bg_input": "...", "border": "..." },
+    "images": { "bg": "https://...", "scene": "", "cover": "data:image/png;base64,...", "decor": "" },
+    "labels": { "header": "cupid player", "subtitle": "love songs", "status_playing": "now playing..", "status_paused": "paused", "status_idle": "" },
+    "custom_css": "@import url('https://fonts.googleapis.com/css2?family=Pixelify+Sans&display=swap');\n.mt-player { font-family: 'Pixelify Sans'; }"
+}
+```
+
+**Как подключается CSS.** Свой CSS идёт отдельным `<style>` без добавок спереди, поэтому `@import` работает. Базовые стили плеера заданы на классах с низкой специфичностью, так что `!important` для них не нужен.
+
+**Структура плеера**
+```
+.mt-player#moodtube-mini-player        [data-mt-state="playing|paused|idle"], .mt-is-playing / .mt-is-paused / .mt-is-idle, .mt-dj-busy
+├─ .mt-slot.mt-slot-bg                 картинка --mt-img-bg (под всем)
+├─ .mt-slot.mt-slot-scene              картинка --mt-img-scene (область под сцену)
+├─ .mt-player-header
+│  ├─ .mt-player-header-title          подпись «Заголовок плеера» (пустая — скрыта)
+│  └─ .mt-player-status                подпись статуса, меняется по состоянию
+├─ .mt-player-body
+│  ├─ .mt-cover > .mt-cover-img, .mt-slot-cover (--mt-img-cover), .mt-cover-hole
+│  ├─ .mt-track-info > .mt-track-title, .mt-track-subtitle, .mt-btn-favorite
+│  ├─ .mt-progress > .mt-time-current, .mt-progress-slider, .mt-time-total
+│  ├─ .mt-controls > .mt-btn-queue, .mt-btn-prev, .mt-btn-play, .mt-btn-next, .mt-btn-ai(.mt-is-busy)
+│  └─ .mt-volume > .mt-volume-low, .mt-volume-slider, .mt-volume-high
+├─ .mt-slot.mt-slot-decor              картинка --mt-img-decor (поверх, клики проходят насквозь)
+├─ .mt-panel.mt-panel-queue / .mt-panel-playlists
+├─ .mt-window-btn.mt-btn-settings / .mt-btn-close
+└─ .mt-resize-handle
+```
+Размер плеера меняет `.moodtube-row-layout` (горизонтальный режим), `.moodtube-no-cover`, `.moodtube-no-vol` и `.moodtube-no-title`.
+
+**Слайдеры** защищены от глобальных стилей таверны. Их вид меняется переменными, `!important` не нужен:
+`--mt-slider-track`, `--mt-slider-track-height`, `--mt-slider-track-radius`, `--mt-slider-progress` (Firefox), `--mt-slider-thumb-size`, `--mt-slider-thumb-bg`, `--mt-slider-thumb-bg-hover`, `--mt-slider-thumb-border`, `--mt-slider-thumb-radius`, `--mt-slider-thumb-shadow`.

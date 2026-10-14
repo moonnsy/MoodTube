@@ -1660,10 +1660,12 @@ function applyTheme(theme) {
     document.documentElement.setAttribute('data-mt-theme', theme || 'blue');
     $('#mt-settings-modal').attr('data-mt-theme', theme || 'blue');
     $('#moodtube-mini-player').attr('data-mt-theme', theme || 'blue');
-    applyCustomThemeCss(theme === 'custom' ? loadCustomTheme() : null);
+    const custom = theme === 'custom' ? loadCustomTheme() : null;
+    applyCustomThemeCss(custom);
+    applyThemeLabels(custom);
 }
 
-// --- КАСТОМНАЯ ТЕМА (CSS + переменные, импорт/экспорт JSON) ---
+// --- КАСТОМНАЯ ТЕМА (CSS + переменные + картинки + подписи, импорт/экспорт JSON) ---
 const MT_CUSTOM_THEME_KEY = 'moodtube_custom_theme';
 const MT_THEME_VARS = [
     { key: 'accent',       css: '--mt-accent',       label: 'Акцент',          def: '#8db7d5' },
@@ -1673,25 +1675,54 @@ const MT_THEME_VARS = [
     { key: 'bg_input',     css: '--mt-bg-input',     label: 'Фон полей ввода', def: 'rgba(10,15,20,0.6)' },
     { key: 'border',       css: '--mt-border',       label: 'Рамки',           def: 'rgba(141,183,213,0.3)' },
 ];
+// Картинки попадают в CSS-переменные --mt-img-*, которые по умолчанию рисуют слоты .mt-slot-*
+const MT_THEME_IMAGES = [
+    { key: 'bg',    css: '--mt-img-bg',    label: 'Фон плеера',           hint: '.mt-slot-bg — под всем содержимым' },
+    { key: 'scene', css: '--mt-img-scene', label: 'Сцена',                hint: '.mt-slot-scene — над фоном, под контролами' },
+    { key: 'cover', css: '--mt-img-cover', label: 'Поверх обложки',       hint: '.mt-slot-cover — винил/рамка поверх обложки' },
+    { key: 'decor', css: '--mt-img-decor', label: 'Декор поверх плеера',  hint: '.mt-slot-decor — бантики, стикеры (клики проходят насквозь)' },
+];
+const MT_THEME_LABELS = [
+    { key: 'header',         label: 'Заголовок плеера',     def: '',            target: '#moodtube-label-header',   hint: 'пусто — скрыт' },
+    { key: 'subtitle',       label: 'Подпись под треком',   def: 'MoodTube DJ', target: '#moodtube-label-subtitle', hint: '' },
+    { key: 'status_playing', label: 'Статус: играет',       def: '',            hint: 'например «now playing..»' },
+    { key: 'status_paused',  label: 'Статус: пауза',        def: '',            hint: '' },
+    { key: 'status_idle',    label: 'Статус: нет трека',    def: '',            hint: '' },
+];
+const MT_IMAGE_MAX_BYTES = 1.5 * 1024 * 1024;
 
 function getDefaultCustomTheme() {
-    const vars = {};
+    const vars = {}, images = {}, labels = {};
     MT_THEME_VARS.forEach(v => vars[v.key] = v.def);
-    return { name: 'My MoodTube Theme', vars, custom_css: '' };
+    MT_THEME_IMAGES.forEach(v => images[v.key] = '');
+    MT_THEME_LABELS.forEach(v => labels[v.key] = v.def);
+    return { name: 'My MoodTube Theme', vars, images, labels, custom_css: '' };
 }
 
 function normalizeCustomTheme(raw) {
     const base = getDefaultCustomTheme();
     if (!raw || typeof raw !== 'object') return base;
-    const vars = { ...base.vars };
+    const vars = { ...base.vars }, images = { ...base.images }, labels = { ...base.labels };
     if (raw.vars && typeof raw.vars === 'object') {
         MT_THEME_VARS.forEach(v => {
             if (typeof raw.vars[v.key] === 'string' && raw.vars[v.key].trim()) vars[v.key] = raw.vars[v.key].trim();
         });
     }
+    if (raw.images && typeof raw.images === 'object') {
+        MT_THEME_IMAGES.forEach(v => {
+            if (typeof raw.images[v.key] === 'string') images[v.key] = raw.images[v.key].trim();
+        });
+    }
+    if (raw.labels && typeof raw.labels === 'object') {
+        MT_THEME_LABELS.forEach(v => {
+            if (typeof raw.labels[v.key] === 'string') labels[v.key] = raw.labels[v.key];
+        });
+    }
     return {
         name: typeof raw.name === 'string' && raw.name.trim() ? raw.name.trim() : base.name,
         vars,
+        images,
+        labels,
         custom_css: typeof raw.custom_css === 'string' ? raw.custom_css : '',
     };
 }
@@ -1702,7 +1733,14 @@ function loadCustomTheme() {
 }
 
 function saveCustomTheme(theme) {
-    localStorage.setItem(MT_CUSTOM_THEME_KEY, JSON.stringify(normalizeCustomTheme(theme)));
+    try {
+        localStorage.setItem(MT_CUSTOM_THEME_KEY, JSON.stringify(normalizeCustomTheme(theme)));
+        return true;
+    } catch (e) {
+        console.error(`${LOG_PREFIX} Custom theme save failed:`, e);
+        toastr.error('MoodTube: тема не сохранилась — не хватает места в браузере. Уменьшите картинки или используйте ссылки (URL) вместо загруженных файлов.');
+        return false;
+    }
 }
 
 // Пустые/опасные значения не должны ломать <style>
@@ -1710,30 +1748,90 @@ function sanitizeCssValue(val) {
     return String(val || '').replace(/[;{}<>]/g, '').trim();
 }
 
+// Значение для url("..."): http(s), относительный путь или data:image/...
+function cssUrlValue(src) {
+    src = String(src || '').trim();
+    if (!src) return '';
+    if (/^\s*(javascript|vbscript):/i.test(src)) return '';
+    if (/^data:/i.test(src) && !/^data:image\//i.test(src)) return '';
+    return `url("${src.replace(/\\/g, '%5C').replace(/"/g, '%22').replace(/[\r\n]+/g, '')}")`;
+}
+
 function applyCustomThemeCss(theme) {
-    let $style = $('#moodtube-custom-theme-css');
-    if (!theme) { $style.remove(); return; }
-    if (!$style.length) $style = $('<style id="moodtube-custom-theme-css"></style>').appendTo('head');
-    const varLines = MT_THEME_VARS
+    let $vars = $('#moodtube-custom-theme-css');
+    let $user = $('#moodtube-custom-theme-user-css');
+    if (!theme) { $vars.remove(); $user.remove(); return; }
+    if (!$vars.length) $vars = $('<style id="moodtube-custom-theme-css"></style>');
+    if (!$user.length) $user = $('<style id="moodtube-custom-theme-user-css"></style>');
+    // Держим оба тега последними в <head>, чтобы тема перекрывала базовые стили и стили таверны
+    $vars.appendTo('head');
+    $user.appendTo('head');
+
+    const lines = MT_THEME_VARS
         .map(v => {
             const val = sanitizeCssValue(theme.vars[v.key]);
             return val ? `    ${v.css}: ${val};` : '';
-        })
-        .filter(Boolean)
-        .join('\n');
-    // </style> в пользовательском CSS закрыл бы тег раньше времени
-    const userCss = String(theme.custom_css || '').replace(/<\/style/gi, '<\\/style');
-    $style.text(`[data-mt-theme="custom"] {\n${varLines}\n}\n\n/* --- User CSS: ${sanitizeCssValue(theme.name)} --- */\n${userCss}`);
+        });
+    MT_THEME_IMAGES.forEach(v => {
+        const val = cssUrlValue(theme.images?.[v.key]);
+        if (val) lines.push(`    ${v.css}: ${val};`);
+    });
+    $vars.text(`[data-mt-theme="custom"] {\n${lines.filter(Boolean).join('\n')}\n}`);
+    // Пользовательский CSS — в отдельном теге и без префиксов, чтобы @import оставался первым правилом
+    $user.text(String(theme.custom_css || ''));
+}
+
+// Текстовые подписи плеера: из кастомной темы или значения по умолчанию
+let mtStatusLabels = { playing: '', paused: '', idle: '' };
+function applyThemeLabels(theme) {
+    const labels = (theme || getDefaultCustomTheme()).labels;
+    MT_THEME_LABELS.forEach(v => {
+        if (v.target) $(v.target).text(labels[v.key] ?? v.def);
+    });
+    mtStatusLabels = { playing: labels.status_playing || '', paused: labels.status_paused || '', idle: labels.status_idle || '' };
+    syncPlayerState();
+}
+
+// Состояние плеера для тем: класс .mt-is-playing и data-mt-state="playing|paused|idle"
+function syncPlayerState() {
+    const $player = $('#moodtube-mini-player');
+    if (!$player.length) return;
+    const playing = $('#moodtube-btn-playpause').hasClass('fa-pause');
+    const hasTrack = typeof trackQueue !== 'undefined' && trackQueue.length > 0 && currentQueueIndex >= 0;
+    const state = playing ? 'playing' : (hasTrack ? 'paused' : 'idle');
+    $player.add('#moodtube-fab')
+        .attr('data-mt-state', state)
+        .toggleClass('mt-is-playing', state === 'playing')
+        .toggleClass('mt-is-paused', state === 'paused')
+        .toggleClass('mt-is-idle', state === 'idle');
+    $('#moodtube-label-status').text(mtStatusLabels[state] || '');
 }
 
 function readCustomThemeForm() {
-    const vars = {};
+    const vars = {}, images = {}, labels = {};
     MT_THEME_VARS.forEach(v => vars[v.key] = String($(`#mt-custom-var-${v.key}`).val() || '').trim());
+    MT_THEME_IMAGES.forEach(v => images[v.key] = String($(`#mt-custom-img-${v.key}`).data('mt-full') ?? $(`#mt-custom-img-${v.key}`).val() ?? '').trim());
+    MT_THEME_LABELS.forEach(v => labels[v.key] = String($(`#mt-custom-label-${v.key}`).val() ?? ''));
     return normalizeCustomTheme({
         name: $('#mt-custom-theme-name').val(),
         vars,
+        images,
+        labels,
         custom_css: $('#mt-custom-theme-css').val(),
     });
+}
+
+// data:-картинки длинные — в поле показываем короткую метку, полное значение держим в data()
+function setCustomImageField(key, src) {
+    const $f = $(`#mt-custom-img-${key}`);
+    src = String(src || '');
+    if (/^data:/i.test(src)) {
+        const kb = Math.round(src.length * 0.75 / 1024);
+        $f.data('mt-full', src).val(`[загруженный файл, ~${kb} КБ]`).prop('readonly', true);
+    } else {
+        $f.removeData('mt-full').val(src).prop('readonly', false);
+    }
+    $(`#mt-custom-img-preview-${key}`).css('background-image', cssUrlValue(src) || 'none');
 }
 
 function fillCustomThemeForm(theme) {
@@ -1744,7 +1842,22 @@ function fillCustomThemeForm(theme) {
         const hex = /^#[0-9a-f]{6}$/i.test(theme.vars[v.key]) ? theme.vars[v.key] : null;
         if (hex) $(`#mt-custom-pick-${v.key}`).val(hex);
     });
+    MT_THEME_IMAGES.forEach(v => setCustomImageField(v.key, theme.images[v.key]));
+    MT_THEME_LABELS.forEach(v => $(`#mt-custom-label-${v.key}`).val(theme.labels[v.key]));
     $('#mt-custom-theme-css').val(theme.custom_css);
+}
+
+function loadCustomImageFile(key, file, onDone) {
+    if (!file) return;
+    if (!/^image\//.test(file.type)) { toastr.error('MoodTube: это не картинка'); return; }
+    if (file.size > MT_IMAGE_MAX_BYTES) {
+        toastr.error(`MoodTube: картинка больше ${Math.round(MT_IMAGE_MAX_BYTES / 1024 / 1024 * 10) / 10} МБ. Сожмите её или вставьте ссылку (URL).`);
+        return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => { setCustomImageField(key, String(reader.result)); onDone && onDone(); };
+    reader.onerror = () => toastr.error('MoodTube: не удалось прочитать картинку');
+    reader.readAsDataURL(file);
 }
 
 function toggleCustomThemeBlock() {
@@ -1755,9 +1868,11 @@ function exportCustomTheme() {
     const theme = readCustomThemeForm();
     const payload = {
         type: 'moodtube_theme',
-        version: 1,
+        version: 2,
         name: theme.name,
         vars: theme.vars,
+        images: theme.images,
+        labels: theme.labels,
         custom_css: theme.custom_css,
     };
     const blob = new Blob([JSON.stringify(payload, null, 4)], { type: 'application/json' });
@@ -1786,7 +1901,7 @@ function importCustomThemeFile(file) {
         }
 
         let theme;
-        if (data.type === 'moodtube_theme' || data.vars) {
+        if (data.type === 'moodtube_theme' || data.vars || data.images || data.labels) {
             theme = normalizeCustomTheme(data);
         } else if (typeof data.custom_css === 'string' || data.blur_tint_color || data.quote_text_color) {
             // Тема SillyTavern
@@ -1803,6 +1918,7 @@ function importCustomThemeFile(file) {
 
         fillCustomThemeForm(theme);
         applyCustomThemeCss(theme);
+        applyThemeLabels(theme);
         toastr.success(`MoodTube: тема «${theme.name}» загружена. Нажмите «Сохранить», чтобы применить навсегда.`);
     };
     reader.onerror = () => toastr.error('MoodTube: не удалось прочитать файл');
@@ -1812,7 +1928,7 @@ function importCustomThemeFile(file) {
 async function triggerMoodAnalysisAndPlay() {
     if (isAnalysisInProgress) return;
     
-    $('#moodtube-btn-ai').css('color', '#00ff00').addClass('fa-spin');
+    $('#moodtube-btn-ai').addClass('fa-spin mt-is-busy'); $('#moodtube-mini-player').addClass('mt-dj-busy');
     isAnalysisInProgress = true;
 
     try {
@@ -1994,7 +2110,7 @@ ${reminder}`;
         }
     } finally {
         isAnalysisInProgress = false;
-        $('#moodtube-btn-ai').css('color', ACCENT_COLOR).removeClass('fa-spin');
+        $('#moodtube-btn-ai').removeClass('fa-spin mt-is-busy'); $('#moodtube-mini-player').removeClass('mt-dj-busy');
     }
 }
 
@@ -2320,67 +2436,161 @@ async function initializeExtension() {
             pointer-events: none;
         }
         
-        .moodtube-ctrl:hover { color: var(--mt-accent) !important; transform: scale(1.1); transition: 0.2s; }
-        /* Слайдеры изолированы от глобальных стилей input[type=range] из тем таверны */
+        .moodtube-ctrl:hover { color: var(--mt-accent); transform: scale(1.1); transition: 0.2s; }
+
+        /* ===== Плеер: базовые стили на классах (низкая специфичность — темы перекрывают без !important) ===== */
+        .mt-player {
+            position: fixed; z-index: 9998; box-sizing: border-box; overflow: hidden;
+            padding: 20px; color: #fff; font-family: -apple-system, sans-serif;
+            background: var(--mt-bg-primary); border: 1px solid var(--mt-border); border-radius: 20px;
+            box-shadow: 0 15px 35px rgba(0,0,0,0.8), inset 0 0 10px rgba(255,255,255,0.05);
+            backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
+            cursor: grab; user-select: none; transition: opacity 0.3s;
+        }
+
+        /* Слоты под картинки/разметку темы. Картинки задаются переменными --mt-img-* */
+        .mt-slot { position: absolute; inset: 0; pointer-events: none; background-repeat: no-repeat; background-position: center; background-size: cover; }
+        .mt-slot-bg    { z-index: 0; background-image: var(--mt-img-bg, none); }
+        .mt-slot-scene { z-index: 1; background-image: var(--mt-img-scene, none); }
+        .mt-slot-decor { z-index: 3; background-image: var(--mt-img-decor, none); background-size: contain; }
+        .mt-slot-cover { z-index: 1; border-radius: inherit; background-image: var(--mt-img-cover, none); }
+
+        .mt-player-header {
+            position: absolute; top: 12px; left: 18px; right: 70px; z-index: 2;
+            display: flex; align-items: baseline; gap: 8px; pointer-events: none;
+            font-size: 12px; white-space: nowrap; overflow: hidden;
+        }
+        .mt-player-header-title { font-weight: 700; color: var(--mt-accent); overflow: hidden; text-overflow: ellipsis; }
+        .mt-player-status { font-size: 11px; opacity: 0.7; overflow: hidden; text-overflow: ellipsis; }
+        .mt-player-header-title:empty, .mt-player-status:empty { display: none; }
+
+        .mt-player-body {
+            position: relative; z-index: 2;
+            display: flex; flex-direction: column; align-items: center; justify-content: center;
+            gap: 15px; width: 100%; height: 100%; box-sizing: border-box;
+        }
+
+        .mt-cover {
+            position: relative; flex-shrink: 0; overflow: hidden;
+            width: 140px; height: 140px; border-radius: 50%;
+            background: #050505; border: 3px solid var(--mt-accent); box-shadow: 0 5px 15px rgba(0,0,0,0.7);
+            display: flex; justify-content: center; align-items: center; transition: 0.3s all;
+        }
+        .mt-cover-img { width: 100%; height: 100%; border-radius: 50%; object-fit: cover; }
+        .mt-cover-hole {
+            position: absolute; z-index: 2; width: 14px; height: 14px;
+            background: #222; border-radius: 50%; border: 1px solid var(--mt-accent); transition: 0.3s all;
+        }
+
+        .mt-track-info {
+            position: relative; flex-shrink: 0; box-sizing: border-box;
+            display: flex; flex-direction: column; align-items: center;
+            width: 100%; padding: 0 22px; text-align: center;
+        }
+        .mt-track-info > span { max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .mt-track-title { font-weight: 600; font-size: 15px; width: 100%; margin-bottom: 2px; }
+        .mt-track-subtitle { color: var(--mt-accent); font-size: 12px; font-weight: bold; }
+        .mt-track-subtitle:empty { display: none; }
+
+        .mt-progress { display: flex; align-items: center; width: 100%; flex-shrink: 0; gap: 5px; margin-top: -5px; font-size: 10px; color: #aaa; }
+        .mt-time { flex-shrink: 0; min-width: 28px; font-variant-numeric: tabular-nums; }
+        .mt-time-total { text-align: right; }
+
+        .mt-controls { display: flex; gap: 15px; align-items: center; flex-shrink: 0; }
+        .mt-btn { cursor: pointer; color: #fff; font-size: 18px; transition: 0.2s; }
+        .mt-btn-accent { color: var(--mt-accent); }
+        .mt-btn-small { font-size: 12px; }
+        .mt-btn-queue { font-size: 16px; }
+        .mt-btn-play { font-size: 28px; width: 28px; text-align: center; }
+        .mt-btn-favorite { position: absolute; right: 0; top: 0; color: var(--mt-accent); font-size: 16px; }
+        .mt-btn-ai.mt-is-busy { color: #00ff00; }
+        .mt-window-btn { position: absolute; top: 12px; z-index: 5; color: #888; font-size: 16px; }
+        .mt-btn-settings { right: 40px; }
+        .mt-btn-close { right: 15px; }
+
+        .mt-volume { display: flex; align-items: center; width: 90%; flex-shrink: 0; }
+        .mt-volume-icon { color: var(--mt-accent); font-size: 12px; }
+        .mt-volume-high { font-size: 14px; }
+
+        .mt-panel {
+            position: absolute; inset: 0; z-index: 4; box-sizing: border-box;
+            flex-direction: column; padding: 15px; background: var(--mt-bg-primary);
+        }
+        .mt-panel-playlists { z-index: 5; }
+        .mt-panel-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; flex-shrink: 0; }
+        .mt-panel-header-left { display: flex; align-items: center; gap: 10px; }
+        .mt-panel-title { font-weight: bold; font-size: 14px; color: var(--mt-accent); }
+        .mt-panel-close { font-size: 14px; }
+        .mt-panel-list { flex: 1; overflow-y: auto; padding-right: 5px; }
+
+        .mt-resize-handle {
+            position: absolute; bottom: 0; right: 0; z-index: 10; width: 25px; height: 25px;
+            display: flex; justify-content: center; align-items: center; cursor: nwse-resize;
+        }
+        .mt-resize-handle i { color: rgba(255,255,255,0.2); font-size: 14px; transform: rotate(-45deg); }
+
+        /* Слайдеры изолированы от глобальных стилей input[type=range] из тем таверны.
+           Внешний вид настраивается переменными --mt-slider-* без !important. */
         #moodtube-mini-player input[type="range"].moodtube-slider {
             -webkit-appearance: none !important; appearance: none !important;
-            flex: 1 1 auto; width: 100%; min-width: 40px; height: 14px !important;
+            flex: 1 1 auto; width: 100%; min-width: 40px; height: var(--mt-slider-thumb-size, 14px) !important;
             margin: 0 8px !important; padding: 0 !important;
-            background: transparent !important; background-image: none !important;
+            background: transparent !important;
             border: none !important; border-radius: 0 !important; box-shadow: none !important;
             outline: none !important; filter: none !important; opacity: 1 !important;
             cursor: pointer; transform: none !important;
         }
         #moodtube-mini-player input[type="range"].moodtube-slider::-webkit-slider-runnable-track {
-            -webkit-appearance: none !important; height: 4px !important;
-            background: rgba(255,255,255,0.12) !important; background-image: none !important;
-            border: none !important; border-radius: 2px !important; box-shadow: none !important;
+            -webkit-appearance: none !important; height: var(--mt-slider-track-height, 4px) !important;
+            background: var(--mt-slider-track, rgba(255,255,255,0.12)) !important;
+            border: none !important; border-radius: var(--mt-slider-track-radius, 2px) !important; box-shadow: none !important;
         }
         #moodtube-mini-player input[type="range"].moodtube-slider::-moz-range-track {
-            height: 4px !important;
-            background: rgba(255,255,255,0.12) !important; background-image: none !important;
-            border: none !important; border-radius: 2px !important; box-shadow: none !important;
+            height: var(--mt-slider-track-height, 4px) !important;
+            background: var(--mt-slider-track, rgba(255,255,255,0.12)) !important;
+            border: none !important; border-radius: var(--mt-slider-track-radius, 2px) !important; box-shadow: none !important;
         }
-        #moodtube-mini-player input[type="range"].moodtube-slider::-moz-range-progress { background: var(--mt-accent) !important; height: 4px !important; border-radius: 2px !important; }
+        #moodtube-mini-player input[type="range"].moodtube-slider::-moz-range-progress {
+            height: var(--mt-slider-track-height, 4px) !important;
+            background: var(--mt-slider-progress, var(--mt-accent)) !important;
+            border-radius: var(--mt-slider-track-radius, 2px) !important;
+        }
         #moodtube-mini-player input[type="range"].moodtube-slider::-webkit-slider-thumb {
             -webkit-appearance: none !important; appearance: none !important;
-            width: 14px !important; height: 14px !important; margin-top: -5px !important;
-            border-radius: 50% !important; border: 2px solid #fff !important;
-            background: var(--mt-accent) !important; background-image: none !important;
-            box-shadow: 0 0 5px rgba(0,0,0,0.5) !important;
+            width: var(--mt-slider-thumb-size, 14px) !important; height: var(--mt-slider-thumb-size, 14px) !important;
+            margin-top: calc((var(--mt-slider-track-height, 4px) - var(--mt-slider-thumb-size, 14px)) / 2) !important;
+            border-radius: var(--mt-slider-thumb-radius, 50%) !important;
+            border: var(--mt-slider-thumb-border, 2px solid #fff) !important;
+            background: var(--mt-slider-thumb-bg, var(--mt-accent)) !important;
+            box-shadow: var(--mt-slider-thumb-shadow, 0 0 5px rgba(0,0,0,0.5)) !important;
             -webkit-mask: none !important; mask: none !important; filter: none !important;
             content: none !important; cursor: pointer; box-sizing: border-box !important;
         }
         #moodtube-mini-player input[type="range"].moodtube-slider::-moz-range-thumb {
-            width: 14px !important; height: 14px !important;
-            border-radius: 50% !important; border: 2px solid #fff !important;
-            background: var(--mt-accent) !important; background-image: none !important;
-            box-shadow: 0 0 5px rgba(0,0,0,0.5) !important;
+            width: var(--mt-slider-thumb-size, 14px) !important; height: var(--mt-slider-thumb-size, 14px) !important;
+            border-radius: var(--mt-slider-thumb-radius, 50%) !important;
+            border: var(--mt-slider-thumb-border, 2px solid #fff) !important;
+            background: var(--mt-slider-thumb-bg, var(--mt-accent)) !important;
+            box-shadow: var(--mt-slider-thumb-shadow, 0 0 5px rgba(0,0,0,0.5)) !important;
             mask: none !important; filter: none !important; cursor: pointer; box-sizing: border-box !important;
         }
-        #moodtube-mini-player input[type="range"].moodtube-slider:hover::-webkit-slider-thumb { background: var(--mt-accent-hover) !important; }
-        #moodtube-mini-player input[type="range"].moodtube-slider:hover::-moz-range-thumb { background: var(--mt-accent-hover) !important; }
-        #moodtube-time-current, #moodtube-time-total { flex-shrink: 0; min-width: 28px; font-variant-numeric: tabular-nums; }
-        #moodtube-time-total { text-align: right; }
-        #moodtube-title-container > span { max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-        
-        #moodtube-mini-player { transition: opacity 0.3s; }
-        #moodtube-inner-content { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 15px; width: 100%; height: 100%; box-sizing: border-box; }
-        
+        #moodtube-mini-player input[type="range"].moodtube-slider:hover::-webkit-slider-thumb { background: var(--mt-slider-thumb-bg-hover, var(--mt-accent-hover)) !important; }
+        #moodtube-mini-player input[type="range"].moodtube-slider:hover::-moz-range-thumb { background: var(--mt-slider-thumb-bg-hover, var(--mt-accent-hover)) !important; }
+
         /* Responsive Row Layout */
-        .moodtube-row-layout #moodtube-inner-content { flex-direction: row; justify-content: flex-start; gap: 12px; }
-        .moodtube-row-layout #moodtube-cover-container { width: 50px !important; height: 50px !important; border-width: 2px !important; }
-        .moodtube-row-layout #moodtube-cover-hole { width: 8px !important; height: 8px !important; }
-        .moodtube-row-layout #moodtube-title-container { align-items: flex-start !important; text-align: left !important; flex: 0 1 180px !important; width: auto !important; min-width: 70px; padding-right: 22px; box-sizing: border-box; }
-        .moodtube-row-layout #moodtube-progress-container { flex: 1 1 140px !important; width: auto !important; min-width: 90px; margin-top: 0 !important; }
-        .moodtube-row-layout #moodtube-controls-container { flex-shrink: 0 !important; gap: 12px !important; }
-        .moodtube-row-layout #moodtube-volume-container { flex: 0 1 110px !important; width: auto !important; min-width: 70px; }
-        
+        .mt-player.moodtube-row-layout .mt-player-body { flex-direction: row; justify-content: flex-start; gap: 12px; }
+        .mt-player.moodtube-row-layout .mt-cover { width: 50px; height: 50px; border-width: 2px; }
+        .mt-player.moodtube-row-layout .mt-cover-hole { width: 8px; height: 8px; }
+        .mt-player.moodtube-row-layout .mt-track-info { align-items: flex-start; text-align: left; flex: 0 1 180px; width: auto; min-width: 70px; padding: 0 22px 0 0; }
+        .mt-player.moodtube-row-layout .mt-progress { flex: 1 1 140px; width: auto; min-width: 90px; margin-top: 0; }
+        .mt-player.moodtube-row-layout .mt-controls { gap: 12px; }
+        .mt-player.moodtube-row-layout .mt-volume { flex: 0 1 110px; width: auto; min-width: 70px; }
+
         /* Minimal Layout (Hidden elements) */
-        .moodtube-no-cover #moodtube-cover-container { display: none !important; }
-        .moodtube-no-vol #moodtube-volume-container { display: none !important; }
-        .moodtube-no-vol #moodtube-progress-container { display: none !important; }
-        .moodtube-no-title #moodtube-title-container { display: none !important; }
+        .mt-player.moodtube-no-cover .mt-cover { display: none; }
+        .mt-player.moodtube-no-vol .mt-volume { display: none; }
+        .mt-player.moodtube-no-vol .mt-progress { display: none; }
+        .mt-player.moodtube-no-title .mt-track-info { display: none; }
     </style>`).appendTo('head');
 
     setInterval(attachToUI, 1000);
@@ -2398,79 +2608,80 @@ async function initializeExtension() {
         } catch (e) {}
         
         $(`
-        <div id="moodtube-mini-player" style="
-            position: fixed; top: 150px; left: 50%; transform: translateX(-50%);
-            background: ${BG_COLOR}; border: 1px solid var(--mt-border);
-            border-radius: 20px; padding: 20px; color: #fff;
-            font-family: -apple-system, sans-serif;
-            z-index: 9998; display: none; 
-            box-shadow: 0 15px 35px rgba(0,0,0,0.8), inset 0 0 10px rgba(255, 255, 255, 0.05); 
-            width: ${savedW}; height: ${savedH}; ${BLUR_CSS} cursor: grab; user-select: none;
-            box-sizing: border-box; overflow: hidden;
-        ">
-            <div id="moodtube-inner-content">
-                <div id="moodtube-cover-container" style="width: 140px; height: 140px; border-radius: 50%; background: #050505; border: 3px solid var(--mt-accent); box-shadow: 0 5px 15px rgba(0,0,0,0.7); display: flex; justify-content: center; align-items: center; position: relative; overflow: hidden; flex-shrink: 0; transition: 0.3s all;">
-                    <img id="moodtube-widget-cover" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7" style="width: 100%; height: 100%; border-radius: 50%; object-fit: cover;">
-                    <div id="moodtube-cover-hole" style="position: absolute; width: 14px; height: 14px; background: #222; border-radius: 50%; border: 1px solid var(--mt-accent); transition: 0.3s all;"></div>
-                </div>
-                
-                <div id="moodtube-title-container" style="display: flex; flex-direction: column; align-items: center; width: 100%; text-align: center; flex-shrink: 0; position: relative;">
-                    <span id="moodtube-widget-title" style="font-weight: 600; font-size: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; width: 100%; margin-bottom: 2px;">No Track Selected</span>
-                    <span style="color: var(--mt-accent); font-size: 12px; font-weight: bold;">MoodTube DJ</span>
-                    <i class="fa-regular fa-heart moodtube-ctrl" id="moodtube-btn-favorite" style="position: absolute; right: 0; top: 0; cursor: pointer; color: var(--mt-accent); font-size: 16px; transition: 0.3s;" title="В избранное"></i>
-                </div>
-                
-                <div id="moodtube-progress-container" style="display: flex; align-items: center; width: 100%; flex-shrink: 0; gap: 5px; margin-top: -5px; font-size: 10px; color: #aaa;">
-                    <span id="moodtube-time-current">0:00</span>
-                    <input type="range" id="moodtube-progress-slider" min="0" max="100" value="0" class="moodtube-slider moodtube-ctrl" style="flex: 1; height: 3px;">
-                    <span id="moodtube-time-total">0:00</span>
-                </div>
-                
-                <div id="moodtube-controls-container" style="display: flex; gap: 15px; align-items: center; flex-shrink: 0;">
-                    <i class="fa-solid fa-list-ul moodtube-ctrl" id="moodtube-btn-queue" style="cursor:pointer; color: var(--mt-accent); font-size: 16px; transition: 0.3s;" title="Queue"></i>
-                    <i class="fa-solid fa-backward-step moodtube-ctrl" id="moodtube-btn-prev" style="cursor:pointer; color: #fff; font-size: 18px; transition: 0.2s;" title="Previous"></i>
-                    <i class="fa-solid fa-play moodtube-ctrl" id="moodtube-btn-playpause" style="cursor:pointer; font-size: 28px; color: #fff; transition: 0.2s; width: 28px; text-align: center;"></i>
-                    <i class="fa-solid fa-forward-step moodtube-ctrl" id="moodtube-btn-next" style="cursor:pointer; color: #fff; font-size: 18px; transition: 0.2s;" title="Next"></i>
-                    <i class="fa-solid fa-wand-magic-sparkles moodtube-ctrl" id="moodtube-btn-ai" style="cursor:pointer; color: var(--mt-accent); font-size: 18px; transition: 0.3s;" title="Auto-DJ (AI)"></i>
+        <div id="moodtube-mini-player" class="mt-player mt-is-idle" data-mt-state="idle" style="top: 150px; left: 50%; transform: translateX(-50%); width: ${savedW}; height: ${savedH}; display: none;">
+            <div class="mt-slot mt-slot-bg" aria-hidden="true"></div>
+            <div class="mt-slot mt-slot-scene" aria-hidden="true"></div>
+
+            <div class="mt-player-header">
+                <span id="moodtube-label-header" class="mt-player-header-title"></span>
+                <span id="moodtube-label-status" class="mt-player-status"></span>
+            </div>
+
+            <div id="moodtube-inner-content" class="mt-player-body">
+                <div id="moodtube-cover-container" class="mt-cover">
+                    <img id="moodtube-widget-cover" class="mt-cover-img" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7">
+                    <div class="mt-slot mt-slot-cover" aria-hidden="true"></div>
+                    <div id="moodtube-cover-hole" class="mt-cover-hole"></div>
                 </div>
 
-                <div id="moodtube-volume-container" style="display: flex; align-items: center; width: 90%; flex-shrink: 0;">
-                    <i class="fa-solid fa-volume-low" style="font-size: 12px; color: var(--mt-accent);"></i>
-                    <input type="range" id="moodtube-vol-slider" min="0" max="100" value="50" class="moodtube-slider moodtube-ctrl">
-                    <i class="fa-solid fa-volume-high" style="font-size: 14px; color: var(--mt-accent);"></i>
+                <div id="moodtube-title-container" class="mt-track-info">
+                    <span id="moodtube-widget-title" class="mt-track-title">No Track Selected</span>
+                    <span id="moodtube-label-subtitle" class="mt-track-subtitle">MoodTube DJ</span>
+                    <i class="fa-regular fa-heart moodtube-ctrl mt-btn mt-btn-favorite" id="moodtube-btn-favorite" title="В избранное"></i>
+                </div>
+
+                <div id="moodtube-progress-container" class="mt-progress">
+                    <span id="moodtube-time-current" class="mt-time mt-time-current">0:00</span>
+                    <input type="range" id="moodtube-progress-slider" min="0" max="100" value="0" class="moodtube-slider moodtube-ctrl mt-progress-slider">
+                    <span id="moodtube-time-total" class="mt-time mt-time-total">0:00</span>
+                </div>
+
+                <div id="moodtube-controls-container" class="mt-controls">
+                    <i class="fa-solid fa-list-ul moodtube-ctrl mt-btn mt-btn-accent mt-btn-queue" id="moodtube-btn-queue" title="Queue"></i>
+                    <i class="fa-solid fa-backward-step moodtube-ctrl mt-btn mt-btn-prev" id="moodtube-btn-prev" title="Previous"></i>
+                    <i class="fa-solid fa-play moodtube-ctrl mt-btn mt-btn-play" id="moodtube-btn-playpause"></i>
+                    <i class="fa-solid fa-forward-step moodtube-ctrl mt-btn mt-btn-next" id="moodtube-btn-next" title="Next"></i>
+                    <i class="fa-solid fa-wand-magic-sparkles moodtube-ctrl mt-btn mt-btn-accent mt-btn-ai" id="moodtube-btn-ai" title="Auto-DJ (AI)"></i>
+                </div>
+
+                <div id="moodtube-volume-container" class="mt-volume">
+                    <i class="fa-solid fa-volume-low mt-volume-icon mt-volume-low"></i>
+                    <input type="range" id="moodtube-vol-slider" min="0" max="100" value="50" class="moodtube-slider moodtube-ctrl mt-volume-slider">
+                    <i class="fa-solid fa-volume-high mt-volume-icon mt-volume-high"></i>
                 </div>
             </div>
-            
-            <div id="moodtube-queue-container" style="display:none; position:absolute; top:0; left:0; width:100%; height:100%; background:${BG_COLOR}; z-index:4; padding:15px; box-sizing:border-box; flex-direction:column;">
-                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px; flex-shrink:0;">
-                    <div style="display:flex; align-items:center; gap: 10px;">
-                        <span style="font-weight:bold; font-size:14px; color:var(--mt-accent);">Очередь треков</span>
-                        <i class="fa-solid fa-trash moodtube-ctrl" id="moodtube-btn-clear-queue" style="cursor:pointer; font-size:12px; color:var(--mt-accent);" title="Очистить очередь"></i>
-                        <i class="fa-solid fa-list-check moodtube-ctrl" id="moodtube-btn-spotify-playlists" style="cursor:pointer; font-size:12px; color:var(--mt-accent); display:none;" title="Мои плейлисты Spotify"></i>
+
+            <div class="mt-slot mt-slot-decor" aria-hidden="true"></div>
+
+            <div id="moodtube-queue-container" class="mt-panel mt-panel-queue" style="display:none;">
+                <div class="mt-panel-header">
+                    <div class="mt-panel-header-left">
+                        <span class="mt-panel-title">Очередь треков</span>
+                        <i class="fa-solid fa-trash moodtube-ctrl mt-btn mt-btn-accent mt-btn-small" id="moodtube-btn-clear-queue" title="Очистить очередь"></i>
+                        <i class="fa-solid fa-list-check moodtube-ctrl mt-btn mt-btn-accent mt-btn-small" id="moodtube-btn-spotify-playlists" style="display:none;" title="Мои плейлисты Spotify"></i>
                     </div>
-                    <i class="fa-solid fa-chevron-down moodtube-ctrl" id="moodtube-btn-close-queue" style="cursor:pointer; font-size:14px; color:#fff;" title="Скрыть"></i>
+                    <i class="fa-solid fa-chevron-down moodtube-ctrl mt-btn mt-panel-close" id="moodtube-btn-close-queue" title="Скрыть"></i>
                 </div>
-                <div id="moodtube-queue-list" style="flex:1; overflow-y:auto; padding-right:5px;">
+                <div id="moodtube-queue-list" class="mt-panel-list">
                     <div style="font-size:12px; color:#888; text-align:center; padding:10px;">Очередь пуста</div>
                 </div>
             </div>
-            
-            <div id="moodtube-spotify-playlists-container" style="display:none; position:absolute; top:0; left:0; width:100%; height:100%; background:${BG_COLOR}; z-index:5; padding:15px; box-sizing:border-box; flex-direction:column;">
-                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px; flex-shrink:0;">
-                    <span style="font-weight:bold; font-size:14px; color:var(--mt-accent);">Плейлисты Spotify</span>
-                    <i class="fa-solid fa-chevron-down moodtube-ctrl" id="moodtube-btn-close-playlists" style="cursor:pointer; font-size:14px; color:#fff;" title="Скрыть"></i>
+
+            <div id="moodtube-spotify-playlists-container" class="mt-panel mt-panel-playlists" style="display:none;">
+                <div class="mt-panel-header">
+                    <span class="mt-panel-title">Плейлисты Spotify</span>
+                    <i class="fa-solid fa-chevron-down moodtube-ctrl mt-btn mt-panel-close" id="moodtube-btn-close-playlists" title="Скрыть"></i>
                 </div>
-                <div id="moodtube-playlists-list" style="flex:1; overflow-y:auto; padding-right:5px;"></div>
+                <div id="moodtube-playlists-list" class="mt-panel-list"></div>
             </div>
-            
-            
+
             <audio id="moodtube-audio-fallback" style="display:none;"></audio>
-            
-            <i class="fa-solid fa-gear moodtube-ctrl" id="moodtube-btn-settings" style="position: absolute; top: 12px; right: 40px; cursor: pointer; color: #888; font-size: 16px; z-index: 5;" title="Settings"></i>
-            <i class="fa-solid fa-xmark moodtube-ctrl" id="moodtube-btn-close" style="position: absolute; top: 12px; right: 15px; cursor: pointer; color: #888; font-size: 16px; z-index: 5;" title="Close"></i>
-            
-            <div id="moodtube-resize-handle" style="position: absolute; bottom: 0; right: 0; width: 25px; height: 25px; cursor: nwse-resize; display: flex; justify-content: center; align-items: center; z-index: 10;">
-                <i class="fa-solid fa-caret-down" style="color: rgba(255,255,255,0.2); font-size: 14px; transform: rotate(-45deg);"></i>
+
+            <i class="fa-solid fa-gear moodtube-ctrl mt-btn mt-window-btn mt-btn-settings" id="moodtube-btn-settings" title="Settings"></i>
+            <i class="fa-solid fa-xmark moodtube-ctrl mt-btn mt-window-btn mt-btn-close" id="moodtube-btn-close" title="Close"></i>
+
+            <div id="moodtube-resize-handle" class="mt-resize-handle">
+                <i class="fa-solid fa-caret-down"></i>
             </div>
         </div>
         `).appendTo('body');
@@ -2658,8 +2869,30 @@ async function initializeExtension() {
                                             </div>
                                         </div>`).join('')}
                                     </div>
+                                    <span class="mt-label" style="margin-top:10px;">Картинки (URL или файл до 1.5 МБ)</span>
+                                    ${MT_THEME_IMAGES.map(v => `
+                                    <div style="margin-top:4px;">
+                                        <span class="mt-label" style="margin-top:2px; font-size:0.76em;">${v.label} <code style="opacity:0.6;">${v.css}</code> — ${v.hint}</span>
+                                        <div style="display:flex; gap:6px; align-items:center;">
+                                            <div id="mt-custom-img-preview-${v.key}" style="width:30px; height:30px; flex-shrink:0; border-radius:6px; border:1px solid var(--mt-border); background:rgba(0,0,0,0.3) center/cover no-repeat;"></div>
+                                            <input type="text" id="mt-custom-img-${v.key}" data-mt-img="${v.key}" class="mt-input-field mt-custom-img" placeholder="https://... или загрузите файл">
+                                            <button class="mt-btn-test mt-custom-img-upload" data-mt-img="${v.key}" style="margin-top:0; width:auto; padding:8px 10px;" title="Загрузить файл"><i class="fa-solid fa-upload"></i></button>
+                                            <button class="mt-btn-test mt-custom-img-clear" data-mt-img="${v.key}" style="margin-top:0; width:auto; padding:8px 10px;" title="Убрать"><i class="fa-solid fa-xmark"></i></button>
+                                        </div>
+                                    </div>`).join('')}
+                                    <input type="file" id="mt-custom-img-file" accept="image/*" style="display:none;">
+
+                                    <span class="mt-label" style="margin-top:10px;">Подписи</span>
+                                    <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(200px, 1fr)); gap:6px 10px;">
+                                        ${MT_THEME_LABELS.map(v => `
+                                        <div>
+                                            <span class="mt-label" style="margin-top:2px; font-size:0.76em;">${v.label}${v.hint ? ` <span style="opacity:0.6;">(${v.hint})</span>` : ''}</span>
+                                            <input type="text" id="mt-custom-label-${v.key}" class="mt-input-field mt-custom-label" placeholder="${v.def}">
+                                        </div>`).join('')}
+                                    </div>
+
                                     <span class="mt-label" style="margin-top:10px;">Custom CSS</span>
-                                    <span class="mt-label" style="margin-top:2px; font-size:0.76em;">Селекторы: <code>#moodtube-mini-player</code>, <code>#moodtube-fab</code>, <code>#mt-settings-modal</code>, <code>.mt-flex-container</code>, <code>.moodtube-ctrl</code>, <code>.moodtube-slider</code>. Применяется сразу (превью).</span>
+                                    <span class="mt-label" style="margin-top:2px; font-size:0.76em;">Идёт отдельным &lt;style&gt; — <code>@import</code> работает. Плеер: <code>.mt-player</code> (+ <code>.mt-is-playing</code> / <code>.mt-is-paused</code> / <code>.mt-is-idle</code>, <code>[data-mt-state]</code>, <code>.mt-dj-busy</code>), слоты <code>.mt-slot-bg</code> <code>.mt-slot-scene</code> <code>.mt-slot-cover</code> <code>.mt-slot-decor</code>, <code>.mt-player-header</code>, <code>.mt-cover</code>, <code>.mt-track-title</code>, <code>.mt-track-subtitle</code>, <code>.mt-progress</code>, <code>.mt-controls</code>, <code>.mt-btn-play</code>, <code>.mt-volume</code>, <code>.mt-panel</code>. Слайдеры: переменные <code>--mt-slider-*</code>. Подробно — в README. Применяется сразу (превью).</span>
                                     <textarea id="mt-custom-theme-css" class="mt-input-field" spellcheck="false" style="resize:vertical; min-height:140px; font-family:monospace; font-size:0.85em; margin-top:6px;" placeholder="#moodtube-mini-player { border-radius: 20px; }"></textarea>
                                     <div style="display:flex; gap:8px; flex-wrap:wrap; margin-top:10px;">
                                         <button id="mt-custom-theme-import" class="mt-btn-test" style="margin-top:0; flex:1; min-width:110px;"><i class="fa-solid fa-file-import"></i> Импорт</button>
@@ -3587,15 +3820,40 @@ async function initializeExtension() {
         // --- Custom theme ---
         const previewCustomTheme = () => {
             if ($('#moodtube-setting-theme').val() !== 'custom') return;
-            applyCustomThemeCss(readCustomThemeForm());
+            const draft = readCustomThemeForm();
+            applyCustomThemeCss(draft);
+            applyThemeLabels(draft);
         };
         $('#moodtube-setting-theme').on('change', () => {
             const theme = $('#moodtube-setting-theme').val();
             toggleCustomThemeBlock();
             document.documentElement.setAttribute('data-mt-theme', theme);
             $('#mt-settings-modal, #moodtube-mini-player').attr('data-mt-theme', theme);
-            applyCustomThemeCss(theme === 'custom' ? readCustomThemeForm() : null);
+            const draft = theme === 'custom' ? readCustomThemeForm() : null;
+            applyCustomThemeCss(draft);
+            applyThemeLabels(draft);
         });
+        // Картинки темы: URL вручную, загрузка файла или очистка
+        let pendingImageKey = null;
+        $(document).on('input', '.mt-custom-img', function() {
+            if ($(this).prop('readonly')) return;
+            setCustomImageField($(this).data('mt-img'), $(this).val());
+            previewCustomTheme();
+        });
+        $(document).on('click', '.mt-custom-img-upload', function(e) {
+            e.preventDefault();
+            pendingImageKey = $(this).data('mt-img');
+            $('#mt-custom-img-file').val('').trigger('click');
+        });
+        $('#mt-custom-img-file').on('change', function() {
+            if (pendingImageKey) loadCustomImageFile(pendingImageKey, this.files && this.files[0], previewCustomTheme);
+        });
+        $(document).on('click', '.mt-custom-img-clear', function(e) {
+            e.preventDefault();
+            setCustomImageField($(this).data('mt-img'), '');
+            previewCustomTheme();
+        });
+        $(document).on('input', '.mt-custom-label', previewCustomTheme);
         $(document).on('input', '#mt-custom-theme-name, #mt-custom-theme-css, .mt-custom-var', function() {
             if ($(this).hasClass('mt-custom-var')) {
                 const key = this.id.replace('mt-custom-var-', '');
@@ -3749,6 +4007,16 @@ async function initializeExtension() {
             }
         });
         observer.observe($('#moodtube-mini-player')[0]);
+
+        // Состояние «играет/пауза/нет трека» для тем. Код плеера перезаписывает class у кнопки play,
+        // поэтому возвращаем её классы и пересчитываем состояние при каждом изменении.
+        const playBtn = document.getElementById('moodtube-btn-playpause');
+        const stateObserver = new MutationObserver(() => {
+            if (!playBtn.classList.contains('mt-btn-play')) playBtn.classList.add('mt-btn', 'mt-btn-play');
+            syncPlayerState();
+        });
+        stateObserver.observe(playBtn, { attributes: true, attributeFilter: ['class'] });
+        stateObserver.observe(document.getElementById('moodtube-widget-title'), { childList: true, characterData: true, subtree: true });
     }
     applyTheme(localStorage.getItem('moodtube_theme') || 'blue');
     updatePlayerVisibility();
