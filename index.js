@@ -2382,7 +2382,7 @@ function handleDrag($el, storageKey) {
     } catch (e) {}
 
     const onStart = (e) => {
-        if ($(e.target).hasClass('moodtube-ctrl') || $(e.target).is('input') || $(e.target).closest('#moodtube-resize-handle').length || $(e.target).closest('#moodtube-queue-list').length || $(e.target).closest('#moodtube-playlists-list').length) return;
+        if ($(e.target).closest('.moodtube-ctrl, input, button, select, textarea, a').length || $(e.target).closest('#moodtube-resize-handle').length || $(e.target).closest('#moodtube-queue-list').length || $(e.target).closest('#moodtube-playlists-list').length) return;
         if (e.type === 'touchstart') e.preventDefault(); // Prevent mobile screen scrolling when dragging the widget
         startX = e.clientX || e.touches?.[0].clientX; startY = e.clientY || e.touches?.[0].clientY;
         const rect = el.getBoundingClientRect();
