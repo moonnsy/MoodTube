@@ -2321,8 +2321,48 @@ async function initializeExtension() {
         }
         
         .moodtube-ctrl:hover { color: var(--mt-accent) !important; transform: scale(1.1); transition: 0.2s; }
-        .moodtube-slider { -webkit-appearance: none; width: 100%; height: 4px; background: rgba(255,255,255,0.1); border-radius: 2px; outline: none; margin: 0 10px; }
-        .moodtube-slider::-webkit-slider-thumb { -webkit-appearance: none; appearance: none; width: 14px; height: 14px; border-radius: 50%; background: var(--mt-accent); cursor: pointer; border: 2px solid #fff; box-shadow: 0 0 5px rgba(0,0,0,0.5); }
+        /* Слайдеры изолированы от глобальных стилей input[type=range] из тем таверны */
+        #moodtube-mini-player input[type="range"].moodtube-slider {
+            -webkit-appearance: none !important; appearance: none !important;
+            flex: 1 1 auto; width: 100%; min-width: 40px; height: 14px !important;
+            margin: 0 8px !important; padding: 0 !important;
+            background: transparent !important; background-image: none !important;
+            border: none !important; border-radius: 0 !important; box-shadow: none !important;
+            outline: none !important; filter: none !important; opacity: 1 !important;
+            cursor: pointer; transform: none !important;
+        }
+        #moodtube-mini-player input[type="range"].moodtube-slider::-webkit-slider-runnable-track {
+            -webkit-appearance: none !important; height: 4px !important;
+            background: rgba(255,255,255,0.12) !important; background-image: none !important;
+            border: none !important; border-radius: 2px !important; box-shadow: none !important;
+        }
+        #moodtube-mini-player input[type="range"].moodtube-slider::-moz-range-track {
+            height: 4px !important;
+            background: rgba(255,255,255,0.12) !important; background-image: none !important;
+            border: none !important; border-radius: 2px !important; box-shadow: none !important;
+        }
+        #moodtube-mini-player input[type="range"].moodtube-slider::-moz-range-progress { background: var(--mt-accent) !important; height: 4px !important; border-radius: 2px !important; }
+        #moodtube-mini-player input[type="range"].moodtube-slider::-webkit-slider-thumb {
+            -webkit-appearance: none !important; appearance: none !important;
+            width: 14px !important; height: 14px !important; margin-top: -5px !important;
+            border-radius: 50% !important; border: 2px solid #fff !important;
+            background: var(--mt-accent) !important; background-image: none !important;
+            box-shadow: 0 0 5px rgba(0,0,0,0.5) !important;
+            -webkit-mask: none !important; mask: none !important; filter: none !important;
+            content: none !important; cursor: pointer; box-sizing: border-box !important;
+        }
+        #moodtube-mini-player input[type="range"].moodtube-slider::-moz-range-thumb {
+            width: 14px !important; height: 14px !important;
+            border-radius: 50% !important; border: 2px solid #fff !important;
+            background: var(--mt-accent) !important; background-image: none !important;
+            box-shadow: 0 0 5px rgba(0,0,0,0.5) !important;
+            mask: none !important; filter: none !important; cursor: pointer; box-sizing: border-box !important;
+        }
+        #moodtube-mini-player input[type="range"].moodtube-slider:hover::-webkit-slider-thumb { background: var(--mt-accent-hover) !important; }
+        #moodtube-mini-player input[type="range"].moodtube-slider:hover::-moz-range-thumb { background: var(--mt-accent-hover) !important; }
+        #moodtube-time-current, #moodtube-time-total { flex-shrink: 0; min-width: 28px; font-variant-numeric: tabular-nums; }
+        #moodtube-time-total { text-align: right; }
+        #moodtube-title-container > span { max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
         
         #moodtube-mini-player { transition: opacity 0.3s; }
         #moodtube-inner-content { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 15px; width: 100%; height: 100%; box-sizing: border-box; }
@@ -2331,8 +2371,10 @@ async function initializeExtension() {
         .moodtube-row-layout #moodtube-inner-content { flex-direction: row; justify-content: flex-start; gap: 12px; }
         .moodtube-row-layout #moodtube-cover-container { width: 50px !important; height: 50px !important; border-width: 2px !important; }
         .moodtube-row-layout #moodtube-cover-hole { width: 8px !important; height: 8px !important; }
-        .moodtube-row-layout #moodtube-title-container { align-items: flex-start !important; text-align: left !important; flex: 1; min-width: 0; }
-        .moodtube-row-layout #moodtube-volume-container { width: 80px; }
+        .moodtube-row-layout #moodtube-title-container { align-items: flex-start !important; text-align: left !important; flex: 0 1 180px !important; width: auto !important; min-width: 70px; padding-right: 22px; box-sizing: border-box; }
+        .moodtube-row-layout #moodtube-progress-container { flex: 1 1 140px !important; width: auto !important; min-width: 90px; margin-top: 0 !important; }
+        .moodtube-row-layout #moodtube-controls-container { flex-shrink: 0 !important; gap: 12px !important; }
+        .moodtube-row-layout #moodtube-volume-container { flex: 0 1 110px !important; width: auto !important; min-width: 70px; }
         
         /* Minimal Layout (Hidden elements) */
         .moodtube-no-cover #moodtube-cover-container { display: none !important; }
