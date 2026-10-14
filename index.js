@@ -1660,6 +1660,153 @@ function applyTheme(theme) {
     document.documentElement.setAttribute('data-mt-theme', theme || 'blue');
     $('#mt-settings-modal').attr('data-mt-theme', theme || 'blue');
     $('#moodtube-mini-player').attr('data-mt-theme', theme || 'blue');
+    applyCustomThemeCss(theme === 'custom' ? loadCustomTheme() : null);
+}
+
+// --- КАСТОМНАЯ ТЕМА (CSS + переменные, импорт/экспорт JSON) ---
+const MT_CUSTOM_THEME_KEY = 'moodtube_custom_theme';
+const MT_THEME_VARS = [
+    { key: 'accent',       css: '--mt-accent',       label: 'Акцент',          def: '#8db7d5' },
+    { key: 'accent_hover', css: '--mt-accent-hover', label: 'Акцент (hover)',  def: '#a5d0f0' },
+    { key: 'bg_primary',   css: '--mt-bg-primary',   label: 'Фон основной',    def: 'rgba(15,20,25,0.88)' },
+    { key: 'bg_secondary', css: '--mt-bg-secondary', label: 'Фон вторичный',   def: 'rgba(22,28,35,0.88)' },
+    { key: 'bg_input',     css: '--mt-bg-input',     label: 'Фон полей ввода', def: 'rgba(10,15,20,0.6)' },
+    { key: 'border',       css: '--mt-border',       label: 'Рамки',           def: 'rgba(141,183,213,0.3)' },
+];
+
+function getDefaultCustomTheme() {
+    const vars = {};
+    MT_THEME_VARS.forEach(v => vars[v.key] = v.def);
+    return { name: 'My MoodTube Theme', vars, custom_css: '' };
+}
+
+function normalizeCustomTheme(raw) {
+    const base = getDefaultCustomTheme();
+    if (!raw || typeof raw !== 'object') return base;
+    const vars = { ...base.vars };
+    if (raw.vars && typeof raw.vars === 'object') {
+        MT_THEME_VARS.forEach(v => {
+            if (typeof raw.vars[v.key] === 'string' && raw.vars[v.key].trim()) vars[v.key] = raw.vars[v.key].trim();
+        });
+    }
+    return {
+        name: typeof raw.name === 'string' && raw.name.trim() ? raw.name.trim() : base.name,
+        vars,
+        custom_css: typeof raw.custom_css === 'string' ? raw.custom_css : '',
+    };
+}
+
+function loadCustomTheme() {
+    try { return normalizeCustomTheme(JSON.parse(localStorage.getItem(MT_CUSTOM_THEME_KEY) || 'null')); }
+    catch (e) { return getDefaultCustomTheme(); }
+}
+
+function saveCustomTheme(theme) {
+    localStorage.setItem(MT_CUSTOM_THEME_KEY, JSON.stringify(normalizeCustomTheme(theme)));
+}
+
+// Пустые/опасные значения не должны ломать <style>
+function sanitizeCssValue(val) {
+    return String(val || '').replace(/[;{}<>]/g, '').trim();
+}
+
+function applyCustomThemeCss(theme) {
+    let $style = $('#moodtube-custom-theme-css');
+    if (!theme) { $style.remove(); return; }
+    if (!$style.length) $style = $('<style id="moodtube-custom-theme-css"></style>').appendTo('head');
+    const varLines = MT_THEME_VARS
+        .map(v => {
+            const val = sanitizeCssValue(theme.vars[v.key]);
+            return val ? `    ${v.css}: ${val};` : '';
+        })
+        .filter(Boolean)
+        .join('\n');
+    // </style> в пользовательском CSS закрыл бы тег раньше времени
+    const userCss = String(theme.custom_css || '').replace(/<\/style/gi, '<\\/style');
+    $style.text(`[data-mt-theme="custom"] {\n${varLines}\n}\n\n/* --- User CSS: ${sanitizeCssValue(theme.name)} --- */\n${userCss}`);
+}
+
+function readCustomThemeForm() {
+    const vars = {};
+    MT_THEME_VARS.forEach(v => vars[v.key] = String($(`#mt-custom-var-${v.key}`).val() || '').trim());
+    return normalizeCustomTheme({
+        name: $('#mt-custom-theme-name').val(),
+        vars,
+        custom_css: $('#mt-custom-theme-css').val(),
+    });
+}
+
+function fillCustomThemeForm(theme) {
+    theme = normalizeCustomTheme(theme);
+    $('#mt-custom-theme-name').val(theme.name);
+    MT_THEME_VARS.forEach(v => {
+        $(`#mt-custom-var-${v.key}`).val(theme.vars[v.key]);
+        const hex = /^#[0-9a-f]{6}$/i.test(theme.vars[v.key]) ? theme.vars[v.key] : null;
+        if (hex) $(`#mt-custom-pick-${v.key}`).val(hex);
+    });
+    $('#mt-custom-theme-css').val(theme.custom_css);
+}
+
+function toggleCustomThemeBlock() {
+    $('#mt-custom-theme-block').toggle($('#moodtube-setting-theme').val() === 'custom');
+}
+
+function exportCustomTheme() {
+    const theme = readCustomThemeForm();
+    const payload = {
+        type: 'moodtube_theme',
+        version: 1,
+        name: theme.name,
+        vars: theme.vars,
+        custom_css: theme.custom_css,
+    };
+    const blob = new Blob([JSON.stringify(payload, null, 4)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${theme.name.replace(/[\\/:*?"<>|]+/g, '_') || 'moodtube-theme'}.json`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    toastr.success(`MoodTube: тема «${theme.name}» экспортирована`);
+}
+
+// Принимает как собственный формат MoodTube, так и файл темы SillyTavern (берёт custom_css и цвета)
+function importCustomThemeFile(file) {
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+        let data;
+        try { data = JSON.parse(String(reader.result)); }
+        catch (e) { toastr.error('MoodTube: файл не является корректным JSON'); return; }
+        if (!data || typeof data !== 'object' || Array.isArray(data)) {
+            toastr.error('MoodTube: неверный формат файла темы');
+            return;
+        }
+
+        let theme;
+        if (data.type === 'moodtube_theme' || data.vars) {
+            theme = normalizeCustomTheme(data);
+        } else if (typeof data.custom_css === 'string' || data.blur_tint_color || data.quote_text_color) {
+            // Тема SillyTavern
+            const vars = {};
+            if (data.quote_text_color) { vars.accent = data.quote_text_color; vars.accent_hover = data.quote_text_color; }
+            if (data.blur_tint_color) vars.bg_primary = data.blur_tint_color;
+            if (data.bot_mes_blur_tint_color) vars.bg_secondary = data.bot_mes_blur_tint_color;
+            if (data.border_color) vars.border = data.border_color;
+            theme = normalizeCustomTheme({ name: data.name || file.name.replace(/\.json$/i, ''), vars, custom_css: data.custom_css || '' });
+        } else {
+            toastr.error('MoodTube: в файле нет ни custom_css, ни переменных темы');
+            return;
+        }
+
+        fillCustomThemeForm(theme);
+        applyCustomThemeCss(theme);
+        toastr.success(`MoodTube: тема «${theme.name}» загружена. Нажмите «Сохранить», чтобы применить навсегда.`);
+    };
+    reader.onerror = () => toastr.error('MoodTube: не удалось прочитать файл');
+    reader.readAsText(file);
 }
 
 async function triggerMoodAnalysisAndPlay() {
@@ -1675,8 +1822,9 @@ async function triggerMoodAnalysisAndPlay() {
             return;
         }
         
-        const snippet = context.chat.slice(-15).map(m => `${m.is_user ? 'User' : 'Character'}: ${m.mes}`).join('\n');
-        
+        const snippet = buildSceneSnippet(context);
+        const sceneBackground = buildSceneBackground(context);
+
         let genre = getMtSetting('genre');
         let scenario = getMtSetting('scenario');
         let banlist = getMtSetting('banlist');
@@ -1686,43 +1834,64 @@ async function triggerMoodAnalysisAndPlay() {
         let hardRule = getMtSetting('hard_rule');
         let favoritesList = getMtSetting('favorites');
         let favoritesContext = getMtSetting('favorites_context') === 'true';
-        
-        let antiRepeatStr = sessionPlayedTracks.length > 0 
-            ? `\nDo NOT pick any of these already played songs: ${sessionPlayedTracks.slice(-20).join(', ')}` 
-            : '';
-            
-        let banListStr = '';
-        if (banlist.trim()) banListStr += `\nDo NOT pick any songs from these artists: ${banlist}`;
-        if (bannedSongs.trim()) banListStr += `\nDo NOT pick any of these specific songs: ${bannedSongs}`;
-        let styleStr = '';
-        if (genre.trim()) styleStr += `\nPreferred Genre/Style: ${genre}`;
-        if (scenario.trim()) styleStr += `\nCurrent Scenario/Vibe: ${scenario}`;
-        
-        let favStr = '';
-        if (favoritesContext && favoritesList.trim()) {
-            favStr = `\nPrioritize these favorite tracks if they fit the mood: ${favoritesList}`;
-        }
-
-        let rusrealRule = (scenario.includes('Русреал') || genre.includes('Русреал')) ? "\nRule: If the scenario or genre is 'Русреал', select ONLY Russian songs and artists (Russian language lyrics)." : "";
-
-        let hardRuleStr = hardRule.trim() ? `\nCRITICAL HARD RULE: The user has EXPLICITLY requested the following artist, song, or theme: "${hardRule}". You MUST fulfill this request precisely, filling the Title and Artist fields accordingly. IGNORE all other tags, rules, or context.` : '';
 
         const bulkCount = parseInt(localStorage.getItem('moodtube_ai_bulk_count') || 10, 10);
         const isBulk = bulkCount > 1;
 
-        const systemInstruction = `[SYSTEM NOTE: CRITICAL OVERRIDE. YOU ARE A STRICT METADATA API. 
-DO NOT ROLEPLAY. DO NOT SPEAK AS THE CHARACTER. NO GREETINGS. NO CONVERSATION.
-Read the chat history and output ONLY a valid JSON ${isBulk ? `array containing exactly ${bulkCount} track objects` : 'object'}.
-Rule 1: If a song is mentioned in the text, select it.
-Rule 2: Otherwise, choose fitting track(s) based on the mood. ${styleStr} ${antiRepeatStr} ${banListStr} ${favStr} ${rusrealRule} ${hardRuleStr}
-Format strictly: ${isBulk ? '[{"Title": "Song Name", "Artist": "Artist Name"}, ...]' : '{"Title": "Song Name", "Artist": "Artist Name"}'}]`;
+        // --- Пользовательские ограничения ---
+        const constraints = [];
+        if (genre.trim()) constraints.push(`Preferred genre/style: ${genre}. Stay inside this style, but still pick the track within it that best matches the moment.`);
+        if (scenario.trim()) constraints.push(`Story setting / vibe tags chosen by the user: ${scenario}. Treat them as the backdrop of the story (setting, era, tone).`);
+        if (scenario.includes('Русреал') || genre.includes('Русреал')) constraints.push(`"Русреал" is active: pick ONLY Russian-language songs by Russian-speaking artists.`);
+        if (favoritesContext && favoritesList.trim()) constraints.push(`User's favorite tracks (use one only if it genuinely fits this exact moment, otherwise use them as a taste reference): ${favoritesList}`);
+        if (banlist.trim()) constraints.push(`BANNED artists — never pick them: ${banlist}`);
+        if (bannedSongs.trim()) constraints.push(`BANNED songs — never pick them: ${bannedSongs}`);
+        if (sessionPlayedTracks.length > 0) constraints.push(`Already played in this session — do NOT repeat them, and avoid repeating the same artists too often: ${sessionPlayedTracks.slice(-25).join(' | ')}`);
+        const constraintsStr = constraints.length ? `\nUSER CONSTRAINTS:\n${constraints.map(c => `- ${c}`).join('\n')}\n` : '';
+
+        const hardRuleStr = hardRule.trim()
+            ? `\nCRITICAL HARD RULE (overrides everything above, including mood): the user EXPLICITLY requested this artist / song / theme: "${hardRule}". Fulfill it precisely.\n`
+            : '';
+
+        const formatStr = isBulk
+            ? `{"Scene": "<one short line: setting + emotion + energy>", "Tracks": [{"Title": "Song Name", "Artist": "Artist Name"}, ... exactly ${bulkCount} items]}`
+            : `{"Scene": "<one short line: setting + emotion + energy>", "Title": "Song Name", "Artist": "Artist Name"}`;
+
+        const taskStr = isBulk
+            ? `Build a playlist of EXACTLY ${bulkCount} tracks that works as the soundtrack for the next stretch of this scene. Track 1 must fit the CURRENT MOMENT best; the following tracks follow the most likely emotional trajectory of the scene (keep the setting and overall tone consistent, let intensity shift naturally). Use a different artist for every track whenever possible.`
+            : `Pick ONE track — the best possible soundtrack for the CURRENT MOMENT.`;
+
+        const systemInstruction = `[SYSTEM NOTE: CRITICAL OVERRIDE. You are MoodTube DJ — a professional film/game music supervisor working as a strict JSON API.
+DO NOT ROLEPLAY. DO NOT CONTINUE THE STORY. DO NOT SPEAK AS ANY CHARACTER. NO GREETINGS, NO EXPLANATIONS OUTSIDE JSON.
+
+TASK: ${taskStr}
+
+HOW TO ANALYZE THE SCENE (think silently, put only a one-line summary in "Scene"):
+1. The music follows the CURRENT MOMENT — the last 1-2 messages. Older messages are only background; never pick by the "average" mood of the whole chat.
+2. Setting: place, era, culture/country, time of day, atmosphere (e.g. rainy night city, medieval tavern, school hallway, spaceship, Moscow suburbs in the 2000s).
+3. Emotional core: the dominant feeling AND its intensity. Follow the subtext and the characters' inner state, not just surface actions (a calm conversation full of hidden tension = tense music; a fight full of grief = sad music).
+4. Energy & tempo: slow / mid / fast, soft / heavy, intimate / epic.
+5. Direction: is tension building, peaking, or resolving?
+
+HOW TO CHOOSE THE MUSIC:
+- Diegetic music wins: if the latest messages say a specific song/artist is playing, being sung, or requested — pick exactly that.
+- Match setting, emotion and energy simultaneously. A great pick fits all three; a pick that fits only one is wrong.
+- Lyrics must not contradict the scene (no happy love song at a funeral, no breakup song on a first date, no party anthem in a tense standoff). For tense, dialogue-heavy or atmospheric moments, instrumental tracks, film/game scores, ambient or low-vocal songs are often the best choice.
+- Respect era and culture of the setting (medieval → folk/celtic/medieval; cyberpunk → synthwave/industrial/darksynth; noir → jazz/blues; Russian setting → Russian artists, etc.), unless the user's genre says otherwise.
+- Think like a music supervisor, not a radio: avoid lazy clichés and the same few mega-hits everyone picks. Prefer precise, tasteful choices that are still easy to find on YouTube.
+- ONLY real, officially released songs. Use the exact official song title and the main artist name as they appear on YouTube/Spotify. Never invent songs. No descriptions, years, "(feat. ...)" or "official video" in the fields.
+${constraintsStr}${hardRuleStr}
+OUTPUT: ONLY one valid JSON object, nothing before or after it:
+${formatStr}]`;
+
+        const reminder = `[REMINDER: Do not continue the story. Reply with ONLY the JSON object in this exact format: ${formatStr}]`;
 
         let defaultPrompt = `${systemInstruction}
-
-Chat History:
+${sceneBackground ? `\nSTORY BACKGROUND (for setting/era only):\n${sceneBackground}\n` : ''}
+CHAT HISTORY (oldest → newest):
 ${snippet}
 
-${systemInstruction}`;
+${reminder}`;
 
         let prompt = defaultPrompt;
         if (customPrompt.trim()) {
@@ -1747,7 +1916,7 @@ ${systemInstruction}`;
             let generate_data = {
                 'messages': [{ role: 'user', content: prompt }],
                 'model': profile.model,
-                'temperature': isBulk ? 0.8 : 0.3,
+                'temperature': isBulk ? 0.9 : 0.7,
                 'stream': false,
                 'chat_completion_source': cc_source,
             };
@@ -1797,39 +1966,21 @@ ${systemInstruction}`;
         let aiText = extractAIText(aiResponse);
         console.log(`${LOG_PREFIX} --- Parsed AI Text ---\n`, aiText);
         
+        const { scene, tracks } = extractTracksFromAI(aiText);
+        if (scene) console.log(`${LOG_PREFIX} DJ scene analysis: ${scene}`);
+
+        if (tracks.length === 0) {
+            console.error(`${LOG_PREFIX} Extracted string failed parsing:`, aiText);
+            throw new Error(isBulk ? "Could not parse bulk tracks array" : "No valid JSON or song info found in response");
+        }
+
         if (isBulk) {
-            let tracks = [];
-            const blockMatch = aiText.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
-            if (blockMatch) {
-                try { tracks = JSON.parse(blockMatch[1]); } catch(e) {}
-            }
-            if (!tracks || tracks.length === 0) {
-                const arrayMatch = aiText.match(/\[\s*\{[\s\S]*\}\s*\]/);
-                if (arrayMatch) {
-                    try { tracks = JSON.parse(arrayMatch[0]); } catch(e) {}
-                }
-            }
-
-            if (!Array.isArray(tracks) || tracks.length === 0) {
-                throw new Error("Could not parse bulk tracks array");
-            }
-
             toastr.success(`MoodTube: Генерирую очередь из ${tracks.length} треков...`);
-
             for (const track of tracks) {
-                const query = `${track.Title || track.title} ${track.Artist || track.artist}`;
-                await searchAndPlay(query);
+                await searchAndPlay(buildTrackSearchQuery(track));
             }
         } else {
-            let parsed = parseAISongJSON(aiText);
-
-            if (!parsed || (!parsed.Title && !parsed.title)) {
-                console.error(`${LOG_PREFIX} Extracted string failed parsing:`, aiText);
-                throw new Error("No valid JSON or song info found in response");
-            }
-            
-            const searchQuery = `${parsed.Title || parsed.title} ${parsed.Artist || parsed.artist}`;
-            await searchAndPlay(searchQuery);
+            await searchAndPlay(buildTrackSearchQuery(tracks[0]));
         }
 
     } catch (e) {
@@ -1846,6 +1997,134 @@ ${systemInstruction}`;
         $('#moodtube-btn-ai').css('color', ACCENT_COLOR).removeClass('fa-spin');
     }
 }
+
+// --- ПОДГОТОВКА КОНТЕКСТА СЦЕНЫ ДЛЯ DJ AI ---
+function cleanMessageForDJ(text) {
+    return String(text || '')
+        .replace(/<think(?:ing)?>[\s\S]*?<\/think(?:ing)?>/gi, ' ')
+        .replace(/<(style|script)[^>]*>[\s\S]*?<\/\1>/gi, ' ')
+        .replace(/```[\s\S]*?```/g, ' ')
+        .replace(/<[^>]+>/g, ' ')
+        .replace(/&nbsp;/g, ' ')
+        .replace(/[ \t]+/g, ' ')
+        .replace(/\s*\n\s*/g, '\n')
+        .replace(/\n{2,}/g, '\n')
+        .trim();
+}
+
+// Для старых сообщений важнее конец (там, где сцена закончилась)
+function truncateForDJ(text, limit) {
+    if (text.length <= limit) return text;
+    return '…' + text.slice(text.length - limit);
+}
+
+function buildSceneSnippet(context) {
+    const userName = context.name1 || 'User';
+    const charName = context.name2 || 'Character';
+    const messages = context.chat
+        .filter(m => m && !m.is_system && typeof m.mes === 'string')
+        .slice(-15)
+        .map(m => ({ name: m.name || (m.is_user ? userName : charName), text: cleanMessageForDJ(m.mes) }))
+        .filter(m => m.text);
+
+    const lastIdx = messages.length - 1;
+    return messages.map((m, i) => {
+        const fromEnd = lastIdx - i;
+        const limit = fromEnd === 0 ? 3000 : fromEnd <= 2 ? 1500 : 500;
+        const text = truncateForDJ(m.text, limit);
+        if (fromEnd === 0) return `\n=== CURRENT MOMENT (latest message — the music must fit THIS) ===\n${m.name}: ${text}`;
+        return `${m.name}: ${text}`;
+    }).join('\n\n');
+}
+
+// Короткая выжимка карточки персонажа: помогает понять сеттинг и эпоху
+function buildSceneBackground(context) {
+    try {
+        const char = context.characters?.[context.characterId];
+        if (!char) return '';
+        const parts = [];
+        const scenario = cleanMessageForDJ(char.scenario || char.data?.scenario || '');
+        const description = cleanMessageForDJ(char.description || char.data?.description || '');
+        if (scenario) parts.push(`Scenario: ${scenario.slice(0, 600)}`);
+        if (description) parts.push(`${char.name || 'Character'}: ${description.slice(0, 600)}`);
+        const text = parts.join('\n');
+        return typeof context.substituteParams === 'function' ? context.substituteParams(text) : text;
+    } catch (e) {
+        return '';
+    }
+}
+
+function buildTrackSearchQuery(track) {
+    const title = String(track.Title || track.title || '').trim();
+    const artist = String(track.Artist || track.artist || '').trim();
+    return artist ? `${artist} - ${title}` : title;
+}
+
+// Ищет в тексте все сбалансированные JSON-объекты/массивы (с учётом строк)
+function findJSONCandidates(text) {
+    const results = [];
+    for (let start = 0; start < text.length; start++) {
+        const open = text[start];
+        if (open !== '{' && open !== '[') continue;
+        const close = open === '{' ? '}' : ']';
+        let depth = 0, inStr = false, esc = false;
+        for (let i = start; i < text.length; i++) {
+            const ch = text[i];
+            if (inStr) {
+                if (esc) esc = false;
+                else if (ch === '\\') esc = true;
+                else if (ch === '"') inStr = false;
+                continue;
+            }
+            if (ch === '"') inStr = true;
+            else if (ch === open) depth++;
+            else if (ch === close) {
+                depth--;
+                if (depth === 0) {
+                    try { results.push(JSON.parse(text.substring(start, i + 1))); start = i; } catch (e) {}
+                    break;
+                }
+            }
+        }
+    }
+    return results;
+}
+
+function isTrackObject(o) {
+    return o && typeof o === 'object' && !Array.isArray(o) && (o.Title || o.title);
+}
+
+// Понимает: {"Scene","Title","Artist"}, {"Scene","Tracks":[...]}, [{...}, ...]
+function extractTracksFromAI(aiText) {
+    const text = cleanThinkBlocks(aiText);
+    const candidates = [];
+    const blockMatch = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+    if (blockMatch) {
+        try { candidates.push(JSON.parse(blockMatch[1])); } catch (e) {}
+    }
+    candidates.push(...findJSONCandidates(text));
+
+    for (const c of candidates) {
+        if (Array.isArray(c)) {
+            const tracks = c.filter(isTrackObject);
+            if (tracks.length) return { scene: '', tracks };
+        } else if (c && typeof c === 'object') {
+            const list = c.Tracks || c.tracks || c.Playlist || c.playlist;
+            if (Array.isArray(list) && list.some(isTrackObject)) {
+                return { scene: c.Scene || c.scene || '', tracks: list.filter(isTrackObject) };
+            }
+            if (isTrackObject(c)) return { scene: c.Scene || c.scene || '', tracks: [c] };
+        }
+    }
+
+    const single = parseAISongJSON(text);
+    return { scene: '', tracks: isTrackObject(single) ? [single] : [] };
+}
+
+function cleanThinkBlocks(text) {
+    return String(text || '').replace(/<think(?:ing)?>[\s\S]*?<\/think(?:ing)?>/gi, '');
+}
+
 
 function extractAIText(aiResponse) {
     if (typeof aiResponse === 'string') return aiResponse;
@@ -2320,7 +2599,34 @@ async function initializeExtension() {
                                     <option value="rose">Rose</option>
                                     <option value="emerald">Emerald</option>
                                     <option value="auto">Tavern Auto</option>
+                                    <option value="custom">Custom (свой CSS)</option>
                                 </select>
+                                <div id="mt-custom-theme-block" style="display:none; padding:10px; background:rgba(0,0,0,0.2); border-radius:8px; margin-top:10px; border:1px solid var(--mt-border);">
+                                    <span class="mt-label" style="margin-top:0; color:var(--mt-accent);"><i class="fa-solid fa-palette"></i> Кастомная тема</span>
+                                    <span class="mt-label">Название темы</span>
+                                    <input type="text" id="mt-custom-theme-name" class="mt-input-field" placeholder="My MoodTube Theme">
+                                    <span class="mt-label">Цвета (HEX или rgba)</span>
+                                    <div id="mt-custom-vars" style="display:grid; grid-template-columns:repeat(auto-fit, minmax(200px, 1fr)); gap:6px 10px;">
+                                        ${MT_THEME_VARS.map(v => `
+                                        <div>
+                                            <span class="mt-label" style="margin-top:2px; font-size:0.76em;">${v.label} <code style="opacity:0.6;">${v.css}</code></span>
+                                            <div style="display:flex; gap:6px; align-items:center;">
+                                                <input type="color" id="mt-custom-pick-${v.key}" data-mt-var="${v.key}" class="mt-custom-pick" style="width:34px; height:30px; padding:0; border:none; background:none; cursor:pointer; flex-shrink:0;">
+                                                <input type="text" id="mt-custom-var-${v.key}" class="mt-input-field mt-custom-var" placeholder="${v.def}">
+                                            </div>
+                                        </div>`).join('')}
+                                    </div>
+                                    <span class="mt-label" style="margin-top:10px;">Custom CSS</span>
+                                    <span class="mt-label" style="margin-top:2px; font-size:0.76em;">Селекторы: <code>#moodtube-mini-player</code>, <code>#moodtube-fab</code>, <code>#mt-settings-modal</code>, <code>.mt-flex-container</code>, <code>.moodtube-ctrl</code>, <code>.moodtube-slider</code>. Применяется сразу (превью).</span>
+                                    <textarea id="mt-custom-theme-css" class="mt-input-field" spellcheck="false" style="resize:vertical; min-height:140px; font-family:monospace; font-size:0.85em; margin-top:6px;" placeholder="#moodtube-mini-player { border-radius: 20px; }"></textarea>
+                                    <div style="display:flex; gap:8px; flex-wrap:wrap; margin-top:10px;">
+                                        <button id="mt-custom-theme-import" class="mt-btn-test" style="margin-top:0; flex:1; min-width:110px;"><i class="fa-solid fa-file-import"></i> Импорт</button>
+                                        <button id="mt-custom-theme-export" class="mt-btn-test" style="margin-top:0; flex:1; min-width:110px;"><i class="fa-solid fa-file-export"></i> Экспорт</button>
+                                        <button id="mt-custom-theme-reset" class="mt-btn-test" style="margin-top:0; flex:1; min-width:110px;"><i class="fa-solid fa-rotate-left"></i> Сброс</button>
+                                    </div>
+                                    <input type="file" id="mt-custom-theme-file" accept=".json,application/json" style="display:none;">
+                                    <span class="mt-label" style="margin-top:6px; font-size:0.74em;">Импорт принимает JSON MoodTube и JSON-темы SillyTavern (берётся custom_css и основные цвета).</span>
+                                </div>
                                 <hr style="border:0; border-top:1px solid rgba(255,255,255,0.05); margin:15px 0;">
                                 <label class="mt-checkbox-row">
                                     <input type="checkbox" id="moodtube-setting-fab">
@@ -3164,6 +3470,8 @@ async function initializeExtension() {
 
             // Load plain inputs
             $('#moodtube-setting-theme').val(localStorage.getItem('moodtube_theme') || 'blue');
+            fillCustomThemeForm(loadCustomTheme());
+            toggleCustomThemeBlock();
             $('#moodtube-playback-source').val(localStorage.getItem('moodtube_playback_source') || 'youtube').trigger('change');
             $('#moodtube-spotify-client-id').val(localStorage.getItem('moodtube_spotify_client_id') || '');
             const spotToken = localStorage.getItem('moodtube_spotify_token');
@@ -3230,6 +3538,52 @@ async function initializeExtension() {
         // --- Close settings ---
         $('#mt-close-settings').on('click', () => {
             $('#mt-settings-modal').hide();
+            // Откат несохранённого превью темы
+            applyTheme(localStorage.getItem('moodtube_theme') || 'blue');
+        });
+
+        // --- Custom theme ---
+        const previewCustomTheme = () => {
+            if ($('#moodtube-setting-theme').val() !== 'custom') return;
+            applyCustomThemeCss(readCustomThemeForm());
+        };
+        $('#moodtube-setting-theme').on('change', () => {
+            const theme = $('#moodtube-setting-theme').val();
+            toggleCustomThemeBlock();
+            document.documentElement.setAttribute('data-mt-theme', theme);
+            $('#mt-settings-modal, #moodtube-mini-player').attr('data-mt-theme', theme);
+            applyCustomThemeCss(theme === 'custom' ? readCustomThemeForm() : null);
+        });
+        $(document).on('input', '#mt-custom-theme-name, #mt-custom-theme-css, .mt-custom-var', function() {
+            if ($(this).hasClass('mt-custom-var')) {
+                const key = this.id.replace('mt-custom-var-', '');
+                const val = String($(this).val()).trim();
+                if (/^#[0-9a-f]{6}$/i.test(val)) $(`#mt-custom-pick-${key}`).val(val);
+            }
+            previewCustomTheme();
+        });
+        $(document).on('input', '.mt-custom-pick', function() {
+            $(`#mt-custom-var-${$(this).data('mt-var')}`).val($(this).val());
+            previewCustomTheme();
+        });
+        // Tab в редакторе CSS вставляет отступ, а не уводит фокус
+        $('#mt-custom-theme-css').on('keydown', function(e) {
+            if (e.key !== 'Tab') return;
+            e.preventDefault();
+            const el = this, start = el.selectionStart, end = el.selectionEnd;
+            el.value = el.value.substring(0, start) + '    ' + el.value.substring(end);
+            el.selectionStart = el.selectionEnd = start + 4;
+            previewCustomTheme();
+        });
+        $('#mt-custom-theme-import').on('click', () => $('#mt-custom-theme-file').val('').trigger('click'));
+        $('#mt-custom-theme-file').on('change', function() {
+            importCustomThemeFile(this.files && this.files[0]);
+        });
+        $('#mt-custom-theme-export').on('click', exportCustomTheme);
+        $('#mt-custom-theme-reset').on('click', () => {
+            if (!confirm('Сбросить кастомную тему к значениям по умолчанию?')) return;
+            fillCustomThemeForm(getDefaultCustomTheme());
+            previewCustomTheme();
         });
 
         // --- Save settings ---
@@ -3239,6 +3593,7 @@ async function initializeExtension() {
             
             const theme = $('#moodtube-setting-theme').val();
             localStorage.setItem('moodtube_theme', theme);
+            saveCustomTheme(readCustomThemeForm());
             applyTheme(theme);
             
             const source = $('#moodtube-playback-source').val();
