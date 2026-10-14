@@ -204,63 +204,6 @@ async function getInvidiousInstances() {
     }
 }
 
-// --- ДИАГНОСТИКА ПОИСКА (видна на экране — удобно на телефоне без консоли) ---
-function mtCheckImage(url, timeoutMs = 6000) {
-    return new Promise(resolve => {
-        const img = new Image();
-        const t = setTimeout(() => { img.src = ''; resolve(false); }, timeoutMs);
-        img.onload = () => { clearTimeout(t); resolve(img.naturalWidth > 0); };
-        img.onerror = () => { clearTimeout(t); resolve(false); };
-        img.src = url + (url.includes('?') ? '&' : '?') + '_mt=' + Date.now();
-    });
-}
-
-async function runSearchDiagnostics() {
-    const lines = [];
-    const add = (ok, text) => lines.push({ ok, text });
-    const testQuery = encodeURIComponent('Nirvana Smells Like Teen Spirit');
-
-    add(navigator.onLine, `Сеть браузера: ${navigator.onLine ? 'онлайн' : 'ОФЛАЙН'}`);
-    add(!!(window.YT && window.YT.Player), `YouTube-плеер (youtube.com/iframe_api): ${window.YT && window.YT.Player ? 'загружен' : 'НЕ загрузился — youtube.com недоступен с этого устройства'}`);
-    add(await mtCheckImage('https://i.ytimg.com/vi/hTWKbfoikeg/default.jpg'), 'Обложки (i.ytimg.com)');
-
-    const pipedResults = await Promise.all(PIPED_INSTANCES.map(async url => {
-        try {
-            const r = await fetchWithTimeout(`${url}/search?q=${testQuery}&filter=all`, {}, 6000);
-            if (!r.ok) return false;
-            const d = await r.json();
-            return Array.isArray(d.items) && d.items.length > 0;
-        } catch (e) { return false; }
-    }));
-    const pipedOk = pipedResults.filter(Boolean).length;
-    add(pipedOk > 0, `Поиск Piped: работает ${pipedOk} из ${PIPED_INSTANCES.length} зеркал`);
-
-    let invOk = 0, invTotal = 0;
-    try {
-        const instances = (await getInvidiousInstances()).slice(0, 6);
-        invTotal = instances.length;
-        const res = await Promise.all(instances.map(async url => {
-            try {
-                const r = await fetchWithTimeout(`${url}/api/v1/search?q=${testQuery}&type=video`, {}, 6000);
-                if (!r.ok) return false;
-                const d = await r.json();
-                return Array.isArray(d) && d.length > 0;
-            } catch (e) { return false; }
-        }));
-        invOk = res.filter(Boolean).length;
-    } catch (e) {}
-    add(invOk > 0, `Поиск Invidious: работает ${invOk} из ${invTotal} зеркал`);
-
-    const searchOk = pipedOk > 0 || invOk > 0;
-    let verdict;
-    if (!navigator.onLine) verdict = 'Устройство не в сети.';
-    else if (!searchOk && !(window.YT && window.YT.Player)) verdict = 'С этого устройства недоступны ни YouTube, ни зеркала поиска. Почти наверняка это блокировка у провайдера/мобильной сети, а не баг расширения — нужен VPN на этом устройстве (или та же сеть, что у компьютера).';
-    else if (!searchOk) verdict = 'Зеркала поиска недоступны с этого устройства (блокировка сети или зеркала временно лежат). Попробуйте VPN или повторите позже.';
-    else if (!(window.YT && window.YT.Player)) verdict = 'Поиск работает, но YouTube-плеер не загрузился — треки найдутся, но играть будут только через запасной аудио-поток (если он доступен). Нужен доступ к youtube.com (VPN).';
-    else verdict = 'Поиск и плеер доступны. Если DJ всё равно ничего не ищет — проблема в шаге ИИ: нажмите «Проверить соединение» выше и посмотрите выбранный профиль на этом устройстве.';
-    return { lines, verdict };
-}
-
 async function getPipedStream(videoId) {
     try {
         const promises = PIPED_INSTANCES.map(async url => {
@@ -1346,7 +1289,6 @@ async function resolveQueueBackground() {
                     delete track.isSearching;
                     track.title = "❌ Не найдено: " + track.originalQuery;
                     updateQueueUI();
-                    toastr.warning('MoodTube: трек не найден — возможно, зеркала поиска недоступны с этого устройства. Настройки → API → «Диагностика поиска треков».', '', { preventDuplicates: true });
                     if (currentQueueIndex === i) {
                         playNextInQueue();
                     }
@@ -3071,8 +3013,6 @@ async function initializeExtension() {
                                     <button id="moodtube-btn-sync-profiles" class="mt-btn-test" style="margin-top: 0; width: auto; padding: 8px 12px;" title="Синхронизировать"><i class="fa-solid fa-arrows-rotate"></i></button>
                                 </div>
                                 <button id="moodtube-btn-test-profile" class="mt-btn-test" style="margin-top: 10px;">Проверить соединение</button>
-                                <button id="moodtube-btn-diagnose-search" class="mt-btn-test" style="margin-top: 10px;"><i class="fa-solid fa-stethoscope"></i> Диагностика поиска треков</button>
-                                <div id="moodtube-diagnose-result" style="display:none; margin-top:8px; padding:10px; border-radius:8px; border:1px solid var(--mt-border); background:rgba(0,0,0,0.2); font-size:0.82em; line-height:1.5;"></div>
                             </div>
                         </div>
 
@@ -3844,22 +3784,6 @@ async function initializeExtension() {
                 toastr.error(`Ошибка сети: ${e.message}`);
             } finally {
                 $('#moodtube-btn-test-profile').text(oldText).prop('disabled', false);
-            }
-        });
-
-        $('#moodtube-btn-diagnose-search').on('click', async function() {
-            const $btn = $(this), $out = $('#moodtube-diagnose-result');
-            $btn.prop('disabled', true).html('<i class="fa-solid fa-spinner fa-spin"></i> Проверяю…');
-            $out.show().text('Проверка займёт до ~10 секунд…');
-            try {
-                const { lines, verdict } = await runSearchDiagnostics();
-                $out.empty();
-                lines.forEach(l => $('<div>').text(`${l.ok ? '✅' : '❌'} ${l.text}`).appendTo($out));
-                $('<div style="margin-top:8px; font-weight:bold;">').text(verdict).appendTo($out);
-            } catch (e) {
-                $out.text('Ошибка диагностики: ' + (e.message || e));
-            } finally {
-                $btn.prop('disabled', false).html('<i class="fa-solid fa-stethoscope"></i> Диагностика поиска треков');
             }
         });
 
