@@ -571,7 +571,7 @@ async function showSpotifyPlaylists() {
         $list.empty();
         
         if (!playlists || playlists.length === 0) {
-            $list.append('<div style="font-size:12px; color:#888; text-align:center; padding:10px;">Плейлисты не найдены. Создайте новый в меню трека.</div>');
+            $list.append('<div class="mt-queue-empty">Плейлисты не найдены. Создайте новый в меню трека.</div>');
             return;
         }
         
@@ -579,14 +579,11 @@ async function showSpotifyPlaylists() {
             if (!pl || !pl.id) return;
             const imgUrl = (pl.images && pl.images.length > 0) ? pl.images[0].url : 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
             const $item = $(`
-                <div style="display:flex; align-items:center; gap:10px; padding:8px 10px; cursor:pointer; border-radius:10px; margin-bottom:5px; background:rgba(0,0,0,0.3); border:1px solid transparent; transition:0.2s;">
-                    <img src="${imgUrl}" style="width:30px; height:30px; border-radius:5px; object-fit:cover; flex-shrink:0;">
-                    <div style="flex:1; overflow:hidden;">
-                        <div style="font-weight:bold; font-size:13px; color:#fff; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${pl.name || 'Без названия'}</div>
-                    </div>
+                <div class="mt-queue-item mt-playlist-item">
+                    <img class="mt-queue-thumb" src="${mtEscapeHtml(imgUrl)}">
+                    <span class="mt-queue-title mt-playlist-title">${mtEscapeHtml(pl.name || 'Без названия')}</span>
                 </div>
             `);
-            $item.hover(function(){ $(this).css('background', 'rgba(255,255,255,0.1)'); }, function(){ $(this).css('background', 'rgba(0,0,0,0.3)'); });
             $item.on('click', () => {
                 playSpotifyPlaylist(`spotify:playlist:${pl.id}`, pl.name || 'Без названия');
             });
@@ -1558,13 +1555,17 @@ function restoreQueueCache() {
     }
 }
 
+function mtEscapeHtml(str) {
+    return String(str ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
 function updateQueueUI(skipSave = false) {
     const $qList = $('#moodtube-queue-list');
     if (!$qList.length) return;
     
     $qList.empty();
     if (trackQueue.length === 0) {
-        $qList.append('<div style="font-size:12px; color:#888; text-align:center; padding:10px;">Очередь пуста</div>');
+        $qList.append('<div class="mt-queue-empty">Очередь пуста</div>');
         if (!skipSave) saveQueueCache();
         return;
     }
@@ -1573,21 +1574,18 @@ function updateQueueUI(skipSave = false) {
         const isCurrent = index === currentQueueIndex;
         const isSpotifyTrack = track.videoId && track.videoId.startsWith('spotify:');
         const showSpotifyAdd = isSpotifyTrack && (localStorage.getItem('moodtube_playback_source') === 'spotify');
+        const thumbUrl = (track.videoThumbnails && track.videoThumbnails.length > 0) ? track.videoThumbnails[0].url : (track.videoId && !track.videoId.startsWith('spotify:') ? `https://i.ytimg.com/vi/${track.videoId}/default.jpg` : 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7');
+        const itemClasses = ['moodtube-queue-item', 'mt-queue-item'];
+        if (isCurrent) itemClasses.push('mt-is-current');
+        if (track.isExhausted) itemClasses.push('mt-is-blocked');
+        if (track.isSearching) itemClasses.push('mt-is-searching');
         const $item = $(`
-            <div class="moodtube-queue-item" style="
-                display:flex; align-items:center; gap:10px; padding:8px 10px; 
-                cursor:pointer; border-radius:10px; margin-bottom:5px;
-                background: ${isCurrent ? 'rgba(255, 255, 255, 0.05)' : 'rgba(0,0,0,0.3)'};
-                border: 1px solid ${isCurrent ? 'var(--mt-accent)' : 'transparent'};
-                transition: 0.2s;
-            ">
-                <img src="${(track.videoThumbnails && track.videoThumbnails.length > 0) ? track.videoThumbnails[0].url : (track.videoId && !track.videoId.startsWith('spotify:') ? `https://i.ytimg.com/vi/${track.videoId}/default.jpg` : 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7')}" style="width:30px; height:30px; border-radius:5px; object-fit:cover; flex-shrink:0; ${!track.videoId ? 'background:rgba(255,255,255,0.1);' : ''}">
-                <span style="font-size:12px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; flex:1; color:${track.isExhausted ? '#ff6b6b' : (isCurrent ? '#fff' : '#aaa')};">
-                    ${track.isExhausted ? '❌ Заблокировано: ' : ''}${track.title}
-                </span>
-                ${isCurrent ? '<i class="fa-solid fa-volume-high" style="color:var(--mt-accent); font-size:10px; margin-right:5px;"></i>' : ''}
-                ${showSpotifyAdd ? '<div class="moodtube-btn-add-playlist moodtube-ctrl" style="width:16px; height:16px; display:flex; justify-content:center; align-items:center; cursor:pointer;" title="Добавить в плейлист Spotify"><i class="fa-solid fa-plus" style="font-size:12px; color:var(--mt-accent);"></i></div>' : ''}
-                <div class="moodtube-btn-dislike moodtube-ctrl" style="width:16px; height:16px; background-color:rgba(235, 120, 120, 0.65); -webkit-mask: url(https://img.icons8.com/ios-filled/50/dislike.png) no-repeat center / contain; mask: url(https://img.icons8.com/ios-filled/50/dislike.png) no-repeat center / contain; cursor:pointer;" title="Не нравится (В бан-лист)"></div>
+            <div class="${itemClasses.join(' ')}">
+                <img class="mt-queue-thumb${!track.videoId ? ' mt-is-empty' : ''}" src="${mtEscapeHtml(thumbUrl)}">
+                <span class="mt-queue-title">${track.isExhausted ? '❌ Заблокировано: ' : ''}${mtEscapeHtml(track.title)}</span>
+                ${isCurrent ? '<i class="fa-solid fa-volume-high mt-queue-now"></i>' : ''}
+                ${showSpotifyAdd ? '<div class="moodtube-btn-add-playlist moodtube-ctrl mt-queue-add" title="Добавить в плейлист Spotify"><i class="fa-solid fa-plus"></i></div>' : ''}
+                <div class="moodtube-btn-dislike moodtube-ctrl mt-queue-dislike" title="Не нравится (В бан-лист)"></div>
             </div>
         `);
         
@@ -1679,6 +1677,7 @@ const MT_THEME_VARS = [
 const MT_THEME_IMAGES = [
     { key: 'bg',    css: '--mt-img-bg',    label: 'Фон плеера',           hint: '.mt-slot-bg — под всем содержимым' },
     { key: 'scene', css: '--mt-img-scene', label: 'Сцена',                hint: '.mt-slot-scene — над фоном, под контролами' },
+    { key: 'cover_bg', css: '--mt-img-cover-bg', label: 'Под обложкой',   hint: '.mt-slot-cover-bg — сцена только в круге обложки (видна, пока нет трека или если обложка прозрачная)' },
     { key: 'cover', css: '--mt-img-cover', label: 'Поверх обложки',       hint: '.mt-slot-cover — винил/рамка поверх обложки' },
     { key: 'decor', css: '--mt-img-decor', label: 'Декор поверх плеера',  hint: '.mt-slot-decor — бантики, стикеры (клики проходят насквозь)' },
 ];
@@ -1928,7 +1927,7 @@ function importCustomThemeFile(file) {
 async function triggerMoodAnalysisAndPlay() {
     if (isAnalysisInProgress) return;
     
-    $('#moodtube-btn-ai').addClass('fa-spin mt-is-busy'); $('#moodtube-mini-player').addClass('mt-dj-busy');
+    $('#moodtube-btn-ai').addClass('mt-is-busy').find('.mt-btn-icon').addClass('fa-spin'); $('#moodtube-mini-player').addClass('mt-dj-busy');
     isAnalysisInProgress = true;
 
     try {
@@ -2110,7 +2109,7 @@ ${reminder}`;
         }
     } finally {
         isAnalysisInProgress = false;
-        $('#moodtube-btn-ai').removeClass('fa-spin mt-is-busy'); $('#moodtube-mini-player').removeClass('mt-dj-busy');
+        $('#moodtube-btn-ai').removeClass('mt-is-busy').find('.mt-btn-icon').removeClass('fa-spin'); $('#moodtube-mini-player').removeClass('mt-dj-busy');
     }
 }
 
@@ -2448,12 +2447,16 @@ async function initializeExtension() {
             cursor: grab; user-select: none; transition: opacity 0.3s;
         }
 
+        /* Тени/фильтры текста из тем таверны не протекают в плеер (тема MoodTube может вернуть их своим CSS) */
+        .mt-player, .mt-player *, .mt-fab, .mt-fab * { text-shadow: none; }
+
         /* Слоты под картинки/разметку темы. Картинки задаются переменными --mt-img-* */
         .mt-slot { position: absolute; inset: 0; pointer-events: none; background-repeat: no-repeat; background-position: center; background-size: cover; }
         .mt-slot-bg    { z-index: 0; background-image: var(--mt-img-bg, none); }
         .mt-slot-scene { z-index: 1; background-image: var(--mt-img-scene, none); }
         .mt-slot-decor { z-index: 3; background-image: var(--mt-img-decor, none); background-size: contain; }
-        .mt-slot-cover { z-index: 1; border-radius: inherit; background-image: var(--mt-img-cover, none); }
+        .mt-slot-cover-bg { z-index: 0; border-radius: inherit; background-image: var(--mt-img-cover-bg, none); }
+        .mt-slot-cover { z-index: 2; border-radius: inherit; background-image: var(--mt-img-cover, none); }
 
         .mt-player-header {
             position: absolute; top: 12px; left: 18px; right: 70px; z-index: 2;
@@ -2476,9 +2479,9 @@ async function initializeExtension() {
             background: #050505; border: 3px solid var(--mt-accent); box-shadow: 0 5px 15px rgba(0,0,0,0.7);
             display: flex; justify-content: center; align-items: center; transition: 0.3s all;
         }
-        .mt-cover-img { width: 100%; height: 100%; border-radius: 50%; object-fit: cover; }
+        .mt-cover-img { position: relative; z-index: 1; width: 100%; height: 100%; border-radius: 50%; object-fit: cover; }
         .mt-cover-hole {
-            position: absolute; z-index: 2; width: 14px; height: 14px;
+            position: absolute; z-index: 3; width: 14px; height: 14px;
             background: #222; border-radius: 50%; border: 1px solid var(--mt-accent); transition: 0.3s all;
         }
 
@@ -2503,6 +2506,7 @@ async function initializeExtension() {
         .mt-btn-queue { font-size: 16px; }
         .mt-btn-play { font-size: 28px; width: 28px; text-align: center; }
         .mt-btn-favorite { position: absolute; right: 0; top: 0; color: var(--mt-accent); font-size: 16px; }
+        .mt-btn-ai { display: inline-flex; align-items: center; justify-content: center; }
         .mt-btn-ai.mt-is-busy { color: #00ff00; }
         .mt-window-btn { position: absolute; top: 12px; z-index: 5; color: #888; font-size: 16px; }
         .mt-btn-settings { right: 40px; }
@@ -2522,6 +2526,44 @@ async function initializeExtension() {
         .mt-panel-title { font-weight: bold; font-size: 14px; color: var(--mt-accent); }
         .mt-panel-close { font-size: 14px; }
         .mt-panel-list { flex: 1; overflow-y: auto; padding-right: 5px; }
+
+        /* Строки очереди и плейлистов Spotify */
+        .mt-queue-item {
+            display: flex; align-items: center; gap: 10px; padding: 8px 10px; margin-bottom: 5px;
+            cursor: pointer; border-radius: 10px; transition: 0.2s;
+            background: rgba(0,0,0,0.3); border: 1px solid transparent;
+        }
+        .mt-queue-item:hover { background: rgba(255,255,255,0.1); }
+        .mt-queue-item.mt-is-current { background: rgba(255,255,255,0.05); border-color: var(--mt-accent); }
+        .mt-queue-thumb { width: 30px; height: 30px; border-radius: 5px; object-fit: cover; flex-shrink: 0; }
+        .mt-queue-thumb.mt-is-empty { background: rgba(255,255,255,0.1); }
+        .mt-queue-title { flex: 1; min-width: 0; font-size: 12px; color: #aaa; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .mt-queue-item.mt-is-current .mt-queue-title { color: #fff; }
+        .mt-queue-item.mt-is-blocked .mt-queue-title { color: #ff6b6b; }
+        .mt-playlist-title { font-weight: bold; font-size: 13px; color: #fff; }
+        .mt-queue-now { color: var(--mt-accent); font-size: 10px; margin-right: 5px; }
+        .mt-queue-add { width: 16px; height: 16px; display: flex; justify-content: center; align-items: center; cursor: pointer; color: var(--mt-accent); font-size: 12px; }
+        .mt-queue-dislike {
+            width: 16px; height: 16px; flex-shrink: 0; cursor: pointer;
+            background-color: rgba(235,120,120,0.65);
+            -webkit-mask: url(https://img.icons8.com/ios-filled/50/dislike.png) no-repeat center / contain;
+            mask: url(https://img.icons8.com/ios-filled/50/dislike.png) no-repeat center / contain;
+        }
+        .mt-queue-empty { font-size: 12px; color: #888; text-align: center; padding: 10px; }
+
+        /* Плавающая кнопка. Inline у неё только координаты */
+        .mt-fab {
+            position: fixed; z-index: 9999999; width: 48px; height: 48px; box-sizing: border-box;
+            display: flex; justify-content: center; align-items: center;
+            background: var(--mt-bg-secondary); border: 2px solid var(--mt-accent); border-radius: 50%;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.5); color: var(--mt-accent); font-size: 18px;
+            cursor: grab; transition: background 0.2s, border 0.2s;
+            touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
+        }
+        .mt-fab.mt-is-dragging { cursor: grabbing; }
+        .mt-fab.mt-fab-docked { position: relative; z-index: auto; background: rgba(20,15,20,0.82); box-shadow: 0 4px 8px rgba(0,0,0,0.3); cursor: pointer; }
+        .mt-fab-icon { position: relative; z-index: 2; margin-left: 3px; pointer-events: none; color: inherit; }
+        .mt-fab-icon.fa-pause { margin-left: 0; }
 
         .mt-resize-handle {
             position: absolute; bottom: 0; right: 0; z-index: 10; width: 25px; height: 25px;
@@ -2619,6 +2661,7 @@ async function initializeExtension() {
 
             <div id="moodtube-inner-content" class="mt-player-body">
                 <div id="moodtube-cover-container" class="mt-cover">
+                    <div class="mt-slot mt-slot-cover-bg" aria-hidden="true"></div>
                     <img id="moodtube-widget-cover" class="mt-cover-img" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7">
                     <div class="mt-slot mt-slot-cover" aria-hidden="true"></div>
                     <div id="moodtube-cover-hole" class="mt-cover-hole"></div>
@@ -2641,7 +2684,7 @@ async function initializeExtension() {
                     <i class="fa-solid fa-backward-step moodtube-ctrl mt-btn mt-btn-prev" id="moodtube-btn-prev" title="Previous"></i>
                     <i class="fa-solid fa-play moodtube-ctrl mt-btn mt-btn-play" id="moodtube-btn-playpause"></i>
                     <i class="fa-solid fa-forward-step moodtube-ctrl mt-btn mt-btn-next" id="moodtube-btn-next" title="Next"></i>
-                    <i class="fa-solid fa-wand-magic-sparkles moodtube-ctrl mt-btn mt-btn-accent mt-btn-ai" id="moodtube-btn-ai" title="Auto-DJ (AI)"></i>
+                    <span class="moodtube-ctrl mt-btn mt-btn-accent mt-btn-ai" id="moodtube-btn-ai" title="Auto-DJ (AI)"><i class="fa-solid fa-wand-magic-sparkles mt-btn-icon"></i></span>
                 </div>
 
                 <div id="moodtube-volume-container" class="mt-volume">
@@ -2663,7 +2706,7 @@ async function initializeExtension() {
                     <i class="fa-solid fa-chevron-down moodtube-ctrl mt-btn mt-panel-close" id="moodtube-btn-close-queue" title="Скрыть"></i>
                 </div>
                 <div id="moodtube-queue-list" class="mt-panel-list">
-                    <div style="font-size:12px; color:#888; text-align:center; padding:10px;">Очередь пуста</div>
+                    <div class="mt-queue-empty">Очередь пуста</div>
                 </div>
             </div>
 
@@ -3143,27 +3186,20 @@ async function initializeExtension() {
 
         function restoreFabStandalone($fab) {
             const sPos = getFabPos();
-            $fab.css({
-                position: 'fixed', left: Math.max(0, Math.min(sPos.left, window.innerWidth - 60)) + 'px', top: Math.max(0, Math.min(sPos.top, window.innerHeight - 60)) + 'px', right: 'auto', bottom: 'auto',
-                zIndex: '9999999', width: '48px', height: '48px',
-                border: '2px solid var(--mt-accent)', backgroundColor: 'var(--mt-bg-secondary)', color: 'var(--mt-accent)',
-                boxShadow: '0 4px 15px rgba(0,0,0,0.5)', cursor: 'grab'
+            // Inline остаются только координаты (и display от show/hide), остальное — в классах .mt-fab
+            const display = $fab[0].style.display;
+            $fab.removeClass('mt-fab-docked').attr('style', '').css({
+                left: Math.max(0, Math.min(sPos.left, window.innerWidth - 60)) + 'px',
+                top: Math.max(0, Math.min(sPos.top, window.innerHeight - 60)) + 'px',
             });
-            $fab.find('#moodtube-fab-icon').css('color', 'var(--mt-accent)');
+            if (display) $fab[0].style.display = display;
         }
 
         function createFab() {
             if ($('#moodtube-fab').length === 0) {
                 $(`
-                <div id="moodtube-fab" class="moodtube-ctrl" style="
-                    position: fixed; width: 48px; height: 48px;
-                    background: var(--mt-bg-secondary); border: 2px solid var(--mt-accent); border-radius: 50%;
-                    display: flex; justify-content: center; align-items: center;
-                    box-shadow: 0 4px 15px rgba(0,0,0,0.5); cursor: grab; z-index: 9999999;
-                    color: var(--mt-accent); font-size: 18px; transition: background 0.2s, border 0.2s;
-                    touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
-                ">
-                    <i class="fa-solid fa-play" id="moodtube-fab-icon" style="margin-left: 3px; pointer-events: none; position: relative; z-index: 2;"></i>
+                <div id="moodtube-fab" class="moodtube-ctrl mt-fab mt-is-idle" data-mt-state="idle">
+                    <i class="fa-solid fa-play mt-fab-icon" id="moodtube-fab-icon"></i>
                 </div>
                 `).appendTo('body');
                 
@@ -3187,7 +3223,7 @@ async function initializeExtension() {
                     startX = event.clientX; startY = event.clientY;
                     initialLeft = el.offsetLeft; initialTop = el.offsetTop;
                     currentDx = 0; currentDy = 0;
-                    el.style.cursor = 'grabbing';
+                    el.classList.add('mt-is-dragging');
                 };
 
                 const dragMove = (e) => {
@@ -3221,7 +3257,7 @@ async function initializeExtension() {
                     if (startX === undefined) return;
                     startX = undefined;
                     if (rafId) cancelAnimationFrame(rafId);
-                    el.style.cursor = 'grab';
+                    el.classList.remove('mt-is-dragging');
                     document.body.classList.remove('moodtube-no-select');
                     
                     if (isDragging) {
@@ -3269,7 +3305,7 @@ async function initializeExtension() {
                 }, true);
 
                 const isPaused = $('#moodtube-btn-playpause').hasClass('fa-pause');
-                $('#moodtube-fab-icon').attr('class', isPaused ? 'fa-solid fa-pause' : 'fa-solid fa-play').css('margin-left', isPaused ? '0' : '3px');
+                $('#moodtube-fab-icon').attr('class', isPaused ? 'fa-solid fa-pause mt-fab-icon' : 'fa-solid fa-play mt-fab-icon');
             }
             return $('#moodtube-fab');
         }
@@ -3289,13 +3325,9 @@ async function initializeExtension() {
             if ($daContainer.length > 0 && isDaLinked) {
                 if (!$fab.parent().hasClass('DA-floating-window')) {
                     $('#DA-moodtube-placeholder').hide();
-                    $fab.css({
-                        position: 'relative', left: 'auto', top: 'auto', right: 'auto', bottom: 'auto',
-                        zIndex: 'auto', width: '48px', height: '48px',
-                        border: '2px solid ' + ACCENT_COLOR, backgroundColor: 'rgba(20, 15, 20, 0.82)', color: ACCENT_COLOR,
-                        boxShadow: '0 4px 8px rgba(0,0,0,0.3)', cursor: 'pointer'
-                    });
-                    $fab.find('#moodtube-fab-icon').css('color', ACCENT_COLOR);
+                    const display = $fab[0].style.display;
+                    $fab.addClass('mt-fab-docked').attr('style', '');
+                    if (display) $fab[0].style.display = display;
                     $daContainer.find('.DA-floating-window').append($fab);
                 }
             } else {
@@ -3361,9 +3393,7 @@ async function initializeExtension() {
             for(let mutation of mutations) {
                 if(mutation.attributeName === 'class') {
                     const isPaused = $('#moodtube-btn-playpause').hasClass('fa-pause');
-                    $('#moodtube-fab-icon').attr('class', isPaused ? 'fa-solid fa-pause' : 'fa-solid fa-play');
-                    // Убираем марджин для ровного центрирования иконки паузы
-                    $('#moodtube-fab-icon').css('margin-left', isPaused ? '0' : '3px');
+                    $('#moodtube-fab-icon').attr('class', isPaused ? 'fa-solid fa-pause mt-fab-icon' : 'fa-solid fa-play mt-fab-icon');
                     if (isPaused) $('#moodtube-fab').addClass('mt-playing'); else $('#moodtube-fab').removeClass('mt-playing');
                 }
             }
