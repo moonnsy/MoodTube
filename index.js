@@ -1692,6 +1692,10 @@ const MT_THEME_VARS = [
     { key: 'bg_secondary', css: '--mt-bg-secondary', label: 'Фон вторичный',   def: 'rgba(22,28,35,0.88)' },
     { key: 'bg_input',     css: '--mt-bg-input',     label: 'Фон полей ввода', def: 'rgba(10,15,20,0.6)' },
     { key: 'border',       css: '--mt-border',       label: 'Рамки',           def: 'rgba(141,183,213,0.3)' },
+    // Необязательные: пусто — остаются стандартные цвета текста
+    { key: 'text',           css: '--mt-text',           label: 'Текст',               def: '', hint: '#E5E7EB' },
+    { key: 'text_dim',       css: '--mt-text-dim',       label: 'Текст приглушённый',  def: '', hint: '#9CA3AF' },
+    { key: 'text_on_accent', css: '--mt-text-on-accent', label: 'Текст на акценте',    def: '', hint: '#111827' },
 ];
 // Картинки попадают в CSS-переменные --mt-img-*, которые по умолчанию рисуют слоты .mt-slot-*
 const MT_THEME_IMAGES = [
@@ -2460,7 +2464,7 @@ async function initializeExtension() {
         /* ===== Плеер: базовые стили на классах (низкая специфичность — темы перекрывают без !important) ===== */
         .mt-player {
             position: fixed; z-index: 9998; box-sizing: border-box; overflow: hidden;
-            padding: 20px; color: #fff; font-family: -apple-system, sans-serif;
+            padding: 20px; color: var(--mt-text, #fff); font-family: -apple-system, sans-serif;
             background: var(--mt-bg-primary); border: 1px solid var(--mt-border); border-radius: 20px;
             box-shadow: 0 15px 35px rgba(0,0,0,0.8), inset 0 0 10px rgba(255,255,255,0.05);
             backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
@@ -2515,12 +2519,12 @@ async function initializeExtension() {
         .mt-track-subtitle { color: var(--mt-accent); font-size: 12px; font-weight: bold; }
         .mt-track-subtitle:empty { display: none; }
 
-        .mt-progress { display: flex; align-items: center; width: 100%; flex-shrink: 0; gap: 5px; margin-top: -5px; font-size: 10px; color: #aaa; }
+        .mt-progress { display: flex; align-items: center; width: 100%; flex-shrink: 0; gap: 5px; margin-top: -5px; font-size: 10px; color: var(--mt-text-dim, #aaa); }
         .mt-time { flex-shrink: 0; min-width: 28px; font-variant-numeric: tabular-nums; }
         .mt-time-total { text-align: right; }
 
         .mt-controls { display: flex; gap: 15px; align-items: center; flex-shrink: 0; }
-        .mt-btn { cursor: pointer; color: #fff; font-size: 18px; transition: 0.2s; }
+        .mt-btn { cursor: pointer; color: var(--mt-text, #fff); font-size: 18px; transition: 0.2s; }
         .mt-btn-accent { color: var(--mt-accent); }
         .mt-btn-small { font-size: 12px; }
         .mt-btn-queue { font-size: 16px; }
@@ -2528,7 +2532,7 @@ async function initializeExtension() {
         .mt-btn-favorite { position: absolute; right: 0; top: 0; color: var(--mt-accent); font-size: 16px; }
         .mt-btn-ai { display: inline-flex; align-items: center; justify-content: center; }
         .mt-btn-ai.mt-is-busy { color: #00ff00; }
-        .mt-window-btn { position: absolute; top: 12px; z-index: 5; color: #888; font-size: 16px; }
+        .mt-window-btn { position: absolute; top: 12px; z-index: 5; color: var(--mt-text-dim, #888); font-size: 16px; }
         .mt-btn-settings { right: 40px; }
         .mt-btn-close { right: 15px; }
 
@@ -2557,10 +2561,10 @@ async function initializeExtension() {
         .mt-queue-item.mt-is-current { background: rgba(255,255,255,0.05); border-color: var(--mt-accent); }
         .mt-queue-thumb { width: 30px; height: 30px; border-radius: 5px; object-fit: cover; flex-shrink: 0; }
         .mt-queue-thumb.mt-is-empty { background: rgba(255,255,255,0.1); }
-        .mt-queue-title { flex: 1; min-width: 0; font-size: 12px; color: #aaa; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-        .mt-queue-item.mt-is-current .mt-queue-title { color: #fff; }
+        .mt-queue-title { flex: 1; min-width: 0; font-size: 12px; color: var(--mt-text-dim, #aaa); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .mt-queue-item.mt-is-current .mt-queue-title { color: var(--mt-text, #fff); }
         .mt-queue-item.mt-is-blocked .mt-queue-title { color: #ff6b6b; }
-        .mt-playlist-title { font-weight: bold; font-size: 13px; color: #fff; }
+        .mt-playlist-title { font-weight: bold; font-size: 13px; color: var(--mt-text, #fff); }
         .mt-queue-now { color: var(--mt-accent); font-size: 10px; margin-right: 5px; }
         .mt-queue-add { width: 16px; height: 16px; display: flex; justify-content: center; align-items: center; cursor: pointer; color: var(--mt-accent); font-size: 12px; }
         .mt-queue-dislike {
@@ -2569,7 +2573,7 @@ async function initializeExtension() {
             -webkit-mask: url(https://img.icons8.com/ios-filled/50/dislike.png) no-repeat center / contain;
             mask: url(https://img.icons8.com/ios-filled/50/dislike.png) no-repeat center / contain;
         }
-        .mt-queue-empty { font-size: 12px; color: #888; text-align: center; padding: 10px; }
+        .mt-queue-empty { font-size: 12px; color: var(--mt-text-dim, #888); text-align: center; padding: 10px; }
 
         /* Плавающая кнопка. Inline у неё только координаты */
         .mt-fab {
@@ -2758,7 +2762,7 @@ async function initializeExtension() {
     width: 100vw !important;
     height: 100vh !important;
     height: 100dvh !important;
-    background-color: rgba(10, 15, 20, 0.55) !important;
+    background-color: var(--mt-overlay, rgba(10, 15, 20, 0.55));
     z-index: 999999 !important;
     backdrop-filter: blur(35px);
     font-family: 'Inter', 'Segoe UI', sans-serif;
@@ -2767,15 +2771,15 @@ async function initializeExtension() {
     display: flex; align-items: center; justify-content: center;
     width: 100%; height: 100%; padding: 15px; box-sizing: border-box;
 }
-.mt-flex-container {
+#mt-settings-modal .mt-flex-container {
     display: flex; flex-direction: column;
     width: 100%; max-width: 480px; max-height: 92dvh;
     background-color: var(--mt-bg-primary);
     backdrop-filter: blur(45px);
     border: 1px solid var(--mt-border);
     border-radius: 16px;
-    box-shadow: 0 30px 60px rgba(0,0,0,0.9) !important;
-    overflow: hidden; box-sizing: border-box;
+    box-shadow: var(--mt-modal-shadow, 0 30px 60px rgba(0,0,0,0.9));
+    overflow: hidden; box-sizing: border-box; color: var(--mt-text, #E5E7EB);
 }
 .mt-header {
     display: flex; justify-content: space-between; align-items: center;
@@ -2784,9 +2788,10 @@ async function initializeExtension() {
     flex-shrink: 0;
     border-bottom: 1px solid var(--mt-border);
 }
-.mt-header h3 { margin: 0; font-size: 1.15em; font-weight: 600; color: #E5E7EB; letter-spacing: 0.5px; }
-.mt-close { cursor: pointer; font-size: 1.2em; color: #9CA3AF; transition: color 0.2s; }
-.mt-close:hover { color: #fff; }
+.mt-header h3 { margin: 0; font-size: 1.15em; font-weight: 600; color: var(--mt-text, #E5E7EB); letter-spacing: 0.5px; }
+.mt-header-icon { margin-right: 8px; color: var(--mt-accent); }
+.mt-close { cursor: pointer; font-size: 1.2em; color: var(--mt-text-dim, #9CA3AF); transition: color 0.2s; }
+.mt-close:hover { color: var(--mt-text-strong, var(--mt-text, #fff)); }
 .mt-content {
     padding: 20px; overflow-y: auto; flex-grow: 1;
     scrollbar-width: thin; scrollbar-color: rgba(255,255,255,0.15) transparent;
@@ -2805,12 +2810,12 @@ async function initializeExtension() {
     transition: background-color 0.2s;
 }
 .mt-cat-title:hover { background-color: rgba(255,255,255,0.04); }
-.mt-cat-title i:first-child { font-size: 1em; width: 20px; text-align: center; color: var(--mt-accent) !important; }
+#mt-settings-modal .mt-cat-title i:first-child { font-size: 1em; width: 20px; text-align: center; color: var(--mt-accent); }
 .mt-cat-title h4 {
     margin: 0; font-size: 0.88em; font-weight: 500;
-    text-transform: uppercase; letter-spacing: 1px; flex-grow: 1; color: #D1D5DB;
+    text-transform: uppercase; letter-spacing: 1px; flex-grow: 1; color: var(--mt-text-soft, var(--mt-text, #D1D5DB));
 }
-.mt-chevron { color: #8c93a1; font-size: 0.75em; transition: transform 0.3s ease; }
+.mt-chevron { color: var(--mt-text-dim, #8c93a1); font-size: 0.75em; transition: transform 0.3s ease; }
 .mt-chevron.open { transform: rotate(180deg); }
 .mt-cat-content { display: none; padding: 10px 14px 14px 14px; box-sizing: border-box; }
 .mt-cat-content.open { display: block; }
@@ -2819,31 +2824,31 @@ async function initializeExtension() {
     background-color: rgba(45,45,50,0.8);
     border: 1px solid rgba(255,255,255,0.1); border-radius: 8px;
     cursor: pointer; user-select: none;
-    font-size: 0.82em; font-weight: 500; color: #D1D5DB;
+    font-size: 0.82em; font-weight: 500; color: var(--mt-text-soft, var(--mt-text, #D1D5DB));
     transition: all 0.2s ease;
     box-shadow: 0 2px 5px rgba(0,0,0,0.2);
 }
 
 .mt-tag:active { transform: scale(0.96); }
 /* Genre tags */
-.mt-genre-tag:hover { border-color: var(--mt-accent); color: #fff; background-color: rgba(255, 255, 255, 0.1); }
-.mt-genre-tag.active { background-color: var(--mt-accent); color: #111827; border-color: var(--mt-accent); font-weight: 600; box-shadow: 0 0 10px var(--mt-border); }
+.mt-genre-tag:hover { border-color: var(--mt-accent); color: var(--mt-text-strong, var(--mt-text, #fff)); background-color: rgba(255, 255, 255, 0.1); }
+.mt-genre-tag.active { background-color: var(--mt-accent); color: var(--mt-text-on-accent, #111827); border-color: var(--mt-accent); font-weight: 600; box-shadow: 0 0 10px var(--mt-border); }
 /* Mood tags */
-.mt-mood-tag:hover { border-color: var(--mt-accent); color: #fff; background-color: rgba(255, 255, 255, 0.1); }
-.mt-mood-tag.active { background-color: var(--mt-accent); color: #111827; border-color: var(--mt-accent); font-weight: 600; box-shadow: 0 0 10px var(--mt-border); }
+.mt-mood-tag:hover { border-color: var(--mt-accent); color: var(--mt-text-strong, var(--mt-text, #fff)); background-color: rgba(255, 255, 255, 0.1); }
+.mt-mood-tag.active { background-color: var(--mt-accent); color: var(--mt-text-on-accent, #111827); border-color: var(--mt-accent); font-weight: 600; box-shadow: 0 0 10px var(--mt-border); }
 /* Scenario tags */
-.mt-scenario-tag:hover { border-color: var(--mt-accent); color: #fff; background-color: rgba(255, 255, 255, 0.1); }
-.mt-scenario-tag.active { background-color: var(--mt-accent); color: #111827; border-color: var(--mt-accent); font-weight: 600; box-shadow: 0 0 10px var(--mt-border); }
+.mt-scenario-tag:hover { border-color: var(--mt-accent); color: var(--mt-text-strong, var(--mt-text, #fff)); background-color: rgba(255, 255, 255, 0.1); }
+.mt-scenario-tag.active { background-color: var(--mt-accent); color: var(--mt-text-on-accent, #111827); border-color: var(--mt-accent); font-weight: 600; box-shadow: 0 0 10px var(--mt-border); }
 /* API section */
 .mt-input-field {
     background: var(--mt-bg-input); border: 1px solid var(--mt-border);
-    border-radius: 8px; color: #E5E7EB; padding: 8px 10px;
+    border-radius: 8px; color: var(--mt-text, #E5E7EB); padding: 8px 10px;
     font-size: 0.85em; outline: none; transition: 0.2s;
     width: 100%; box-sizing: border-box; font-family: inherit;
 }
 .mt-input-field:focus { border-color: var(--mt-accent); background: var(--mt-bg-secondary); }
-.mt-input-field::placeholder { color: #6B7280; }
-.mt-label { display: block; font-size: 0.82em; color: #9CA3AF; margin-bottom: 4px; margin-top: 8px; }
+.mt-input-field::placeholder { color: var(--mt-text-placeholder, var(--mt-text-dim, #6B7280)); }
+.mt-label { display: block; font-size: 0.82em; color: var(--mt-text-dim, #9CA3AF); margin-bottom: 4px; margin-top: 8px; }
 .mt-label:first-child { margin-top: 0; }
 .mt-footer {
     padding: 14px 22px;
@@ -2861,30 +2866,38 @@ async function initializeExtension() {
     transition: opacity 0.2s, transform 0.1s;
 }
 .mt-summary-tag:hover { opacity: 0.7; transform: scale(0.95); }
-.mt-sum-genre { background-color: var(--mt-accent); color: #111827; }
-.mt-sum-mood { background-color: var(--mt-accent); color: #111827; }
-.mt-sum-scenario { background-color: var(--mt-accent); color: #111827; }
+.mt-sum-genre { background-color: var(--mt-accent); color: var(--mt-text-on-accent, #111827); }
+.mt-sum-mood { background-color: var(--mt-accent); color: var(--mt-text-on-accent, #111827); }
+.mt-sum-scenario { background-color: var(--mt-accent); color: var(--mt-text-on-accent, #111827); }
 .mt-btn-save {
     width: 100%; padding: 12px; border: none; border-radius: 8px;
-    background: var(--mt-accent); color: #000; font-weight: 600;
+    background: var(--mt-accent); color: var(--mt-text-on-accent, #000); font-weight: 600;
     font-size: 0.95em; cursor: pointer; transition: 0.2s; letter-spacing: 0.5px;
 }
 .mt-btn-save:hover { filter: brightness(1.15); }
 .mt-btn-test {
     width: 100%; padding: 10px; margin-top: 8px;
-    background: rgba(255,255,255,0.07); color: #E5E7EB;
+    background: rgba(255,255,255,0.07); color: var(--mt-text, #E5E7EB);
     border: 1px solid rgba(255,255,255,0.15); border-radius: 8px;
     cursor: pointer; font-weight: 500; font-size: 0.85em; transition: 0.2s;
 }
 .mt-btn-test:hover { background: rgba(255,255,255,0.12); border-color: var(--mt-accent); }
 .mt-checkbox-row {
     display: flex; align-items: center; gap: 8px; cursor: pointer;
-    padding: 4px 0; font-size: 0.9em; color: #D1D5DB;
+    padding: 4px 0; font-size: 0.9em; color: var(--mt-text-soft, var(--mt-text, #D1D5DB));
 }
 .mt-checkbox-row input[type="checkbox"] { width: 16px; height: 16px; cursor: pointer; accent-color: var(--mt-accent); }
+/* Подпанели: редактор темы, настройки Spotify */
+.mt-subpanel { padding: 10px; margin-top: 10px; background: rgba(0,0,0,0.2); border: 1px solid var(--mt-border); border-radius: 8px; }
+.mt-label-strong { color: var(--mt-text-soft, var(--mt-text, #D1D5DB)); }
+.mt-label-accent { color: var(--mt-accent); }
+.mt-input-field.mt-input-readonly { background: rgba(0,0,0,0.4); color: var(--mt-text-dim, #9CA3AF); }
+.mt-status-text { margin-top: 8px; font-size: 0.85em; color: var(--mt-text-dim, #9CA3AF); }
+.mt-divider { border: 0; border-top: 1px solid var(--mt-divider, rgba(255,255,255,0.05)); margin: 15px 0; }
+#mt-settings-modal code { background: var(--mt-bg-input); color: inherit; padding: 0 4px; border-radius: 4px; border: none; }
 @media (max-width: 600px) {
-    .mt-flex-container { max-width: 100% !important; max-height: 100dvh !important; border-radius: 0 !important; border: none !important; }
-    .mt-flex-center { padding: 0 !important; }
+    #mt-settings-modal .mt-flex-container { max-width: 100%; max-height: 100dvh; border-radius: 0; border: none; }
+    #mt-settings-modal .mt-flex-center { padding: 0; }
 }
 </style>`).appendTo('head');
 
@@ -2893,7 +2906,7 @@ async function initializeExtension() {
             <div class="mt-flex-center">
                 <div class="mt-flex-container">
                     <div class="mt-header">
-                        <h3><i class="fa-solid fa-sliders" style="margin-right:8px; color:var(--mt-accent);"></i>MoodTube</h3>
+                        <h3><i class="fa-solid fa-sliders mt-header-icon"></i>MoodTube</h3>
                         <div style="display:flex; align-items:center; gap:15px;">
                             <span class="mt-close" id="mt-close-settings">&#10006;</span>
                         </div>
@@ -2917,8 +2930,8 @@ async function initializeExtension() {
                                     <option value="auto">Tavern Auto</option>
                                     <option value="custom">Custom (свой CSS)</option>
                                 </select>
-                                <div id="mt-custom-theme-block" style="display:none; padding:10px; background:rgba(0,0,0,0.2); border-radius:8px; margin-top:10px; border:1px solid var(--mt-border);">
-                                    <span class="mt-label" style="margin-top:0; color:var(--mt-accent);"><i class="fa-solid fa-palette"></i> Кастомная тема</span>
+                                <div id="mt-custom-theme-block" class="mt-subpanel mt-theme-editor" style="display:none;">
+                                    <span class="mt-label mt-label-accent" style="margin-top:0;"><i class="fa-solid fa-palette"></i> Кастомная тема</span>
                                     <span class="mt-label">Название темы</span>
                                     <input type="text" id="mt-custom-theme-name" class="mt-input-field" placeholder="My MoodTube Theme">
                                     <span class="mt-label">Цвета (HEX или rgba)</span>
@@ -2928,7 +2941,7 @@ async function initializeExtension() {
                                             <span class="mt-label" style="margin-top:2px; font-size:0.76em;">${v.label} <code style="opacity:0.6;">${v.css}</code></span>
                                             <div style="display:flex; gap:6px; align-items:center;">
                                                 <input type="color" id="mt-custom-pick-${v.key}" data-mt-var="${v.key}" class="mt-custom-pick" style="width:34px; height:30px; padding:0; border:none; background:none; cursor:pointer; flex-shrink:0;">
-                                                <input type="text" id="mt-custom-var-${v.key}" class="mt-input-field mt-custom-var" placeholder="${v.def}">
+                                                <input type="text" id="mt-custom-var-${v.key}" class="mt-input-field mt-custom-var" placeholder="${v.def || (v.hint + ' (по умолчанию)')}">
                                             </div>
                                         </div>`).join('')}
                                     </div>
@@ -2965,7 +2978,7 @@ async function initializeExtension() {
                                     <input type="file" id="mt-custom-theme-file" accept=".json,application/json" style="display:none;">
                                     <span class="mt-label" style="margin-top:6px; font-size:0.74em;">Импорт принимает JSON MoodTube и JSON-темы SillyTavern (берётся custom_css и основные цвета).</span>
                                 </div>
-                                <hr style="border:0; border-top:1px solid rgba(255,255,255,0.05); margin:15px 0;">
+                                <hr class="mt-divider">
                                 <label class="mt-checkbox-row">
                                     <input type="checkbox" id="moodtube-setting-fab">
                                     <span>Включить плавающую кнопку</span>
@@ -2987,25 +3000,25 @@ async function initializeExtension() {
                                     <option value="spotify">Spotify (Premium SDK)</option>
                                 </select>
                                 
-                                <div id="moodtube-spotify-settings" style="display:none; padding: 10px; background: rgba(0,0,0,0.2); border-radius: 8px; margin-top: 10px; border: 1px solid var(--mt-border);">
-                                    <span class="mt-label" style="margin-top:0; color:var(--mt-accent);"><i class="fa-brands fa-spotify"></i> Spotify Настройки</span>
+                                <div id="moodtube-spotify-settings" class="mt-subpanel mt-spotify-settings" style="display:none;">
+                                    <span class="mt-label mt-label-accent" style="margin-top:0;"><i class="fa-brands fa-spotify"></i> Spotify Настройки</span>
                                     <span class="mt-label">Client ID</span>
                                     <input type="text" id="moodtube-spotify-client-id" class="mt-input-field" placeholder="Client ID">
                                     <span class="mt-label" style="margin-top:8px;">Точный Redirect URI (скопируйте в Dashboard)</span>
                                     <div style="display:flex; gap: 8px; margin-top:4px;">
-                                        <input type="text" id="moodtube-spotify-redirect-show" class="mt-input-field" readonly style="flex:1; background:rgba(0,0,0,0.4); color:#9CA3AF;">
+                                        <input type="text" id="moodtube-spotify-redirect-show" class="mt-input-field mt-input-readonly" readonly style="flex:1;">
                                         <button id="moodtube-btn-copy-redirect" class="mt-btn-test" style="margin-top:0; width:auto; padding: 8px 12px;" title="Скопировать"><i class="fa-regular fa-copy"></i></button>
                                     </div>
                                     <button id="moodtube-btn-spotify-auth" class="mt-btn-test" style="margin-top: 10px;">Авторизоваться</button>
-                                    <div id="moodtube-spotify-status" style="margin-top: 8px; font-size: 0.85em; color: #9CA3AF;"></div>
+                                    <div id="moodtube-spotify-status" class="mt-status-text"></div>
                                 </div>
                                 
-                                <hr style="border:0; border-top:1px solid rgba(255,255,255,0.05); margin:15px 0;">
+                                <hr class="mt-divider">
 
                                 <span class="mt-label" style="margin-top:0;">Количество треков для генерации за раз</span>
                                 <input type="number" id="moodtube-bulk-count" value="10" min="1" max="30" class="mt-input-field" style="width: 100px;">
                                 
-                                <hr style="border:0; border-top:1px solid rgba(255,255,255,0.05); margin:15px 0;">
+                                <hr class="mt-divider">
 
                                 <span class="mt-label">Профиль подключения</span>
                                 <div style="display: flex; gap: 8px;">
@@ -3163,15 +3176,15 @@ async function initializeExtension() {
                                 <span class="mt-label">Свои сценарии / настроение (через запятую)</span>
                                 <input type="text" id="mt-scenario-custom-2" class="mt-input-field mt-sync-scenario">
                                 
-                                <hr style="border:0; border-top:1px solid rgba(255,255,255,0.05); margin:15px 0;">
+                                <hr class="mt-divider">
                                 
-                                <span class="mt-label" style="margin-top:0; color:#ccc;">Жесткое правило (Hard Rule) для промпта</span>
+                                <span class="mt-label mt-label-strong" style="margin-top:0;">Жесткое правило (Hard Rule) для промпта</span>
                                 <span class="mt-label" style="margin-top:4px; font-size:0.78em;">Команда, заставляющая ИИ включить то, что вы написали в чате</span>
                                 <input type="text" id="moodtube-setting-hard-rule" class="mt-input-field" placeholder='[OOC: Start the music: {"Title": "_", "Artist": "_"}]'>
 
-                                <hr style="border:0; border-top:1px solid rgba(255,255,255,0.05); margin:15px 0;">
+                                <hr class="mt-divider">
 
-                                <span class="mt-label" style="margin-top:0; color:#ccc;">Кастомный промпт (заменяет стандартный полностью)</span>
+                                <span class="mt-label mt-label-strong" style="margin-top:0;">Кастомный промпт (заменяет стандартный полностью)</span>
                                 <span class="mt-label" style="margin-top:4px; font-size:0.78em;">Макросы: <b>{{snippet}}</b> — история чата, <b>{{history}}</b> — проигранные треки</span>
                                 <textarea id="moodtube-setting-custom" class="mt-input-field" style="resize:vertical; min-height:100px; margin-top:8px;"></textarea>
                             </div>

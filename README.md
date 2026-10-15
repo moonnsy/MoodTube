@@ -108,5 +108,21 @@
 
 Размер плеера меняет `.moodtube-row-layout` (горизонтальный режим), `.moodtube-no-cover`, `.moodtube-no-vol` и `.moodtube-no-title`.
 
+**Цвета текста и окно настроек** (`#mt-settings-modal`) тоже задаются переменными. По умолчанию цвета прежние, поэтому светлую тему можно собрать по одной строке на цвет:
+```css
+#mt-settings-modal, .mt-player, .mt-fab {
+    --mt-text: #3a2230;            /* основной текст (заголовки, поля, кнопки) */
+    --mt-text-dim: #9a6b80;        /* приглушённый текст (подписи, крестик, время, очередь) */
+    --mt-text-on-accent: #fff;     /* текст на акцентном фоне (активные теги, «Сохранить») */
+}
+#mt-settings-modal {
+    --mt-overlay: rgba(255,200,220,.5);            /* затемнение фона за окном */
+    --mt-modal-shadow: 0 10px 30px rgba(0,0,0,.3); /* тень окна */
+}
+```
+Тонкая настройка: `--mt-text-soft` (заголовки категорий, теги, чекбоксы), `--mt-text-strong` (текст при наведении), `--mt-text-placeholder`, `--mt-divider`. Если они не заданы, берутся `--mt-text` и `--mt-text-dim`. Три основных цвета текста можно задать и в редакторе темы.
+
+В окне настроек: `.mt-subpanel` (подпанели), `.mt-theme-editor` (редактор темы), `.mt-spotify-settings`, `.mt-divider`, `.mt-label-strong`, `.mt-label-accent`, `.mt-status-text`. Плашки `code` берут фон `--mt-bg-input`. Рамка окна `.mt-flex-container` стилизуется через `#mt-settings-modal .mt-flex-container`: так тема таверны её не перебивает, а в своей теме пишите селектор с той же специфичностью.
+
 **Слайдеры** защищены от глобальных стилей таверны. Их вид меняется переменными, `!important` не нужен:
 `--mt-slider-track`, `--mt-slider-track-height`, `--mt-slider-track-radius`, `--mt-slider-progress` (Firefox), `--mt-slider-thumb-size`, `--mt-slider-thumb-bg`, `--mt-slider-thumb-bg-hover`, `--mt-slider-thumb-border`, `--mt-slider-thumb-radius`, `--mt-slider-thumb-shadow`.
