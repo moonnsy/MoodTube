@@ -1828,7 +1828,12 @@ function syncPlayerState() {
         .toggleClass('mt-is-paused', state === 'paused')
         .toggleClass('mt-is-idle', state === 'idle');
     $('#moodtube-label-status').text(mtStatusLabels[state] || '');
+    if (state !== lastBroadcastState) {
+        lastBroadcastState = state;
+        window.dispatchEvent(new CustomEvent('moodtube:state', { detail: { state } }));
+    }
 }
+let lastBroadcastState = '';
 
 function readCustomThemeForm() {
     const vars = {}, images = {}, labels = {};
@@ -2534,6 +2539,11 @@ async function initializeExtension() {
         .mt-btn-ai.mt-is-busy { color: #00ff00; }
         .mt-window-btn { position: absolute; top: 12px; z-index: 5; color: var(--mt-text-dim, #888); font-size: 16px; }
         .mt-btn-settings { right: 40px; }
+        .mt-btn-search { right: 65px; }
+        .mt-panel-search .mt-search-row { display: flex; gap: 6px; margin-top: 10px; }
+        .mt-panel-search input { flex: 1; min-width: 0; padding: 8px 10px; border-radius: 6px; border: 1px solid var(--mt-border, rgba(255,255,255,.15)); background: var(--mt-bg-secondary, rgba(255,255,255,.06)); color: var(--mt-text, #fff); font-size: 14px; }
+        .mt-panel-search button { padding: 8px 12px; border: none; border-radius: 6px; background: var(--mt-accent); color: #000; font-weight: bold; cursor: pointer; }
+        .mt-panel-search .mt-search-hint { margin-top: 8px; font-size: 12px; color: var(--mt-text-dim, #888); }
         .mt-btn-close { right: 15px; }
 
         .mt-volume { display: flex; align-items: center; width: 90%; flex-shrink: 0; }
@@ -2744,6 +2754,19 @@ async function initializeExtension() {
 
             <audio id="moodtube-audio-fallback" style="display:none;"></audio>
 
+            <div id="moodtube-search-container" class="mt-panel mt-panel-search" style="display:none;">
+                <div class="mt-panel-header">
+                    <span class="mt-panel-title">Найти трек</span>
+                    <i class="fa-solid fa-chevron-down moodtube-ctrl mt-btn mt-panel-close" id="moodtube-btn-close-search" title="Скрыть"></i>
+                </div>
+                <div class="mt-search-row">
+                    <input type="text" id="moodtube-search-input" class="moodtube-ctrl" placeholder="Название или ссылка YouTube" autocomplete="off">
+                    <button id="moodtube-search-go" class="moodtube-ctrl"><i class="fa-solid fa-play"></i></button>
+                </div>
+                <div class="mt-search-hint">Трек включится сразу. Ссылка на плейлист YouTube — весь плейлист встанет в очередь.</div>
+            </div>
+
+            <i class="fa-solid fa-magnifying-glass moodtube-ctrl mt-btn mt-window-btn mt-btn-search" id="moodtube-btn-search" title="Найти трек"></i>
             <i class="fa-solid fa-gear moodtube-ctrl mt-btn mt-window-btn mt-btn-settings" id="moodtube-btn-settings" title="Settings"></i>
             <i class="fa-solid fa-xmark moodtube-ctrl mt-btn mt-window-btn mt-btn-close" id="moodtube-btn-close" title="Close"></i>
 
@@ -3800,6 +3823,32 @@ async function initializeExtension() {
             }
         });
 
+        // --- Поиск по лупе: название или ссылка YouTube (видео / плейлист) ---
+        const runSearch = async () => {
+            const q = String($('#moodtube-search-input').val() || '').trim();
+            if (!q) return;
+            const $go = $('#moodtube-search-go').prop('disabled', true);
+            try {
+                const res = await playAnything(q);
+                if (res) {
+                    $('#moodtube-search-input').val('');
+                    $('#moodtube-search-container').hide();
+                    if (res.count > 1) toastr.success(`Плейлист «${res.title}»: ${res.count} треков в очереди`, 'MoodTube');
+                } else {
+                    toastr.warning('Ничего не нашлось', 'MoodTube');
+                }
+            } finally {
+                $go.prop('disabled', false);
+            }
+        };
+        $('#moodtube-btn-search').on('click', () => {
+            $('#moodtube-search-container').toggle();
+            if ($('#moodtube-search-container').is(':visible')) setTimeout(() => $('#moodtube-search-input').trigger('focus'), 50);
+        });
+        $('#moodtube-btn-close-search').on('click', () => $('#moodtube-search-container').hide());
+        $('#moodtube-search-go').on('click', runSearch);
+        $('#moodtube-search-input').on('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); runSearch(); } });
+
         // --- Open settings ---
         $('#moodtube-btn-settings').on('click', () => {
             $('#mt-settings-modal').css('display', 'block');
@@ -4164,10 +4213,139 @@ async function playQuery(query) {
     return true;
 }
 
+// Ссылки YouTube: id плейлиста и видео.
+function parseYouTubeLink(text) {
+    const t = String(text || '').trim();
+    if (!/youtu\.?be|youtube\.com/i.test(t) && !/^(PL|OL|RD|UU|LL|FL)[\w-]{10,}$/.test(t)) return null;
+    const list = t.match(/[?&]list=([\w-]+)/)?.[1] || (/^(PL|OL|RD|UU|LL|FL)[\w-]{10,}$/.test(t) ? t : null);
+    const video = t.match(/[?&]v=([\w-]{11})/)?.[1] || t.match(/youtu\.be\/([\w-]{11})/)?.[1] || t.match(/\/(?:shorts|embed|live)\/([\w-]{11})/)?.[1] || null;
+    return list || video ? { list, video } : null;
+}
+
+const pipedId = (url) => String(url || '').match(/[?&]v=([\w-]{11})/)?.[1] || String(url || '').split('/').pop();
+
+// Плейлист YouTube через Piped / Invidious: { title, tracks: [{ videoId, title, thumbnail }] }.
+async function fetchPlaylist(listId) {
+    try {
+        return await Promise.any(PIPED_INSTANCES.map(async url => {
+            const r = await fetchWithTimeout(`${url}/playlists/${listId}`, {}, 6000);
+            if (!r.ok) throw new Error('bad');
+            const d = await r.json();
+            const tracks = (d.relatedStreams || []).map(x => ({ videoId: pipedId(x.url), title: x.title, thumbnail: x.thumbnail })).filter(x => x.videoId);
+            if (!tracks.length) throw new Error('empty');
+            return { title: d.name || 'Плейлист', tracks };
+        }));
+    } catch { /* дальше Invidious */ }
+    try {
+        // Для плейлистов берём все Invidious с API (у части не стоит отметка cors, хотя он есть), плюс обычный список.
+        let all = [];
+        try {
+            const r = await fetchWithTimeout('https://api.invidious.io/instances.json?sort_by=health', {}, 6000);
+            if (r.ok) all = (await r.json()).filter(d => d[1]?.type === 'https' && d[1]?.api === true).map(d => d[1].uri);
+        } catch { /* только обычный список */ }
+        const inst = [...new Set([...all, ...(await getInvidiousInstances())])].slice(0, 12);
+        return await Promise.any(inst.map(async url => {
+            const r = await fetchWithTimeout(`${url}/api/v1/playlists/${listId}`, {}, 6000);
+            if (!r.ok) throw new Error('bad');
+            const d = await r.json();
+            const tracks = (d.videos || []).map(x => ({ videoId: x.videoId, title: x.title, thumbnail: x.videoThumbnails?.[0]?.url || `https://i.ytimg.com/vi/${x.videoId}/hqdefault.jpg` })).filter(x => x.videoId);
+            if (!tracks.length) throw new Error('empty');
+            return { title: d.title || 'Плейлист', tracks };
+        }));
+    } catch { return null; }
+}
+
+// Название видео по id (для ссылки на одно видео).
+async function fetchVideoTitle(videoId) {
+    try {
+        return await Promise.any(PIPED_INSTANCES.map(async url => {
+            const r = await fetchWithTimeout(`${url}/streams/${videoId}`, {}, 5000);
+            if (!r.ok) throw new Error('bad');
+            const d = await r.json();
+            if (!d.title) throw new Error('no title');
+            return d.title;
+        }));
+    } catch { return 'YouTube'; }
+}
+
+// Включить плейлист: первый трек сразу, остальные следом в очереди.
+async function playPlaylist(listId) {
+    const pl = await fetchPlaylist(listId);
+    if (!pl) return null;
+    const objs = pl.tracks.map(t => ({ title: t.title, originalQuery: t.title, videoId: t.videoId, videoThumbnails: t.thumbnail ? [{ url: t.thumbnail }] : [], isValidated: true }));
+    const insertAt = Math.max(currentQueueIndex, -1) + 1;
+    trackQueue.splice(insertAt, 0, ...objs);
+    currentQueueIndex = insertAt;
+    updateQueueUI();
+    playTrack(objs[0]);
+    return { title: pl.title, count: objs.length, tracks: pl.tracks };
+}
+
+// Что угодно из поля: ссылка на плейлист, ссылка на видео или название.
+async function playAnything(text) {
+    const link = parseYouTubeLink(text);
+    if (link?.list) {
+        const res = await playPlaylist(link.list);
+        if (res || !link.video) return res;
+    }
+    if (link?.video) {
+        const title = await fetchVideoTitle(link.video);
+        playFound({ videoId: link.video, title, thumbnail: `https://i.ytimg.com/vi/${link.video}/hqdefault.jpg` }, title);
+        return { title, count: 1 };
+    }
+    return (await playQuery(text)) ? { title: text, count: 1 } : null;
+}
+
+// Поиск без проигрывания — для карточки трека в других расширениях (Telegram).
+async function search(query) {
+    if (typeof query !== 'string' || !query.trim()) return null;
+    query = query.trim();
+    const source = localStorage.getItem('moodtube_playback_source') || 'youtube';
+    const v = source === 'spotify'
+        ? (await searchSpotify(query) || await searchYouTube(query))
+        : await searchYouTube(query);
+    if (!v || (!v.videoId && !v.streamUrl)) return null;
+    return {
+        title: v.title,
+        videoId: v.videoId || null,
+        thumbnail: v.videoThumbnails?.[0]?.url || (v.videoId ? `https://i.ytimg.com/vi/${v.videoId}/hqdefault.jpg` : ''),
+        duration: Number(v.lengthSeconds || v.duration) || 0,
+        ...(v.streamUrl ? { streamUrl: v.streamUrl } : {}),
+    };
+}
+
+// Включить уже найденный трек (из search) — без повторного поиска. Встаёт сразу после текущего.
+function playFound(found, originalQuery = '') {
+    if (!found || (!found.videoId && !found.streamUrl)) return false;
+    const trackObj = {
+        title: found.title,
+        originalQuery: originalQuery || found.title,
+        videoId: found.videoId,
+        videoThumbnails: found.thumbnail ? [{ url: found.thumbnail }] : [],
+        isValidated: true,
+    };
+    if (found.streamUrl) {
+        trackObj.streamUrl = found.streamUrl;
+        trackObj.isFallback = true;
+    }
+    const insertAt = Math.max(currentQueueIndex, -1) + 1;
+    trackQueue.splice(insertAt, 0, trackObj);
+    currentQueueIndex = insertAt;
+    updateQueueUI();
+    playTrack(trackObj);
+    return true;
+}
+
 $(document).ready(() => {
     setTimeout(() => {
         window.MoodTubeAPI = {
-            version: 4,
+            version: 6,
+            search,
+            playFound,
+            fetchPlaylist,
+            playPlaylist,
+            playAnything,
+            parseYouTubeLink,
             enqueueQuery,
             enqueueMany,
             playTrack,
@@ -4180,6 +4358,6 @@ $(document).ready(() => {
             seekTo,
         };
         window.dispatchEvent(new CustomEvent('moodtube:ready', { detail: window.MoodTubeAPI }));
-        console.log(`${LOG_PREFIX} MoodTubeAPI v4 готов`);
+        console.log(`${LOG_PREFIX} MoodTubeAPI v6 готов`);
     }, 1600);
 });
