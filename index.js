@@ -2919,7 +2919,8 @@ async function initializeExtension() {
 .mt-divider { border: 0; border-top: 1px solid var(--mt-divider, rgba(255,255,255,0.05)); margin: 15px 0; }
 #mt-settings-modal code { background: var(--mt-bg-input); color: inherit; padding: 0 4px; border-radius: 4px; border: none; }
 @media (max-width: 600px) {
-    #mt-settings-modal .mt-flex-container { max-width: 100%; max-height: 100dvh; border-radius: 0; border: none; }
+    /* На телефоне окно на весь экран фиксированной высоты: при раскрытии вкладок не прыгает. */
+    #mt-settings-modal .mt-flex-container { max-width: 100%; height: 100vh; height: 100dvh; max-height: 100dvh; border-radius: 0; border: none; }
     #mt-settings-modal .mt-flex-center { padding: 0; }
 }
 </style>`).appendTo('head');
