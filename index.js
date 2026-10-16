@@ -872,6 +872,36 @@ function mtTracksWord(n) {
     return `${n} треков`;
 }
 
+// Режим Spotify: разделы Spotify / MoodTube превращаются во вкладки (Spotify слева, MoodTube справа)
+function mtTabify($container, storageKey) {
+    const $secs = $container.children('.mt-pl-section');
+    if ($secs.length < 2) return;
+    $container.addClass('mt-pl-tabbed');
+    const $bar = $('<div class="mt-pl-tabs" role="tablist"></div>');
+    $secs.each((i, sec) => {
+        const $sec = $(sec);
+        const kind = $sec.hasClass('mt-pl-section-spotify') ? 'spotify' : 'moodtube';
+        $sec.attr('data-mt-tab', kind);
+        // Заголовок раздела без кнопки «Создать» во вкладках не нужен
+        const $title = $sec.children('.mt-pl-section-title');
+        if (!$title.find('.mt-pl-section-add').length) $title.addClass('mt-pl-section-title-empty');
+        $('<button type="button" class="mt-pl-tab moodtube-ctrl" role="tab"></button>')
+            .attr('data-mt-tab', kind)
+            .html($title.find('.mt-pl-section-label').html())
+            .appendTo($bar);
+    });
+    $container.prepend($bar);
+    const select = (kind) => {
+        $bar.children('.mt-pl-tab').each((i, b) => $(b).toggleClass('mt-is-active', $(b).attr('data-mt-tab') === kind).attr('aria-selected', $(b).attr('data-mt-tab') === kind));
+        $secs.each((i, sec) => $(sec).toggle($(sec).attr('data-mt-tab') === kind));
+        try { localStorage.setItem(storageKey, kind); } catch (e) {}
+    };
+    $bar.on('click', '.mt-pl-tab', function() { select($(this).attr('data-mt-tab')); });
+    let saved = null;
+    try { saved = localStorage.getItem(storageKey); } catch (e) {}
+    select(saved === 'moodtube' ? 'moodtube' : 'spotify');
+}
+
 function mtSetPlaylistsHeader(title, showBack) {
     $('#moodtube-playlists-title').text(title);
     $('#moodtube-btn-playlists-back').toggle(!!showBack);
@@ -893,9 +923,9 @@ async function renderPlaylistsList() {
     const $list = $('#moodtube-playlists-list').empty();
     const source = localStorage.getItem('moodtube_playback_source') || 'youtube';
 
-    // Spotify — сверху, только в режиме Spotify
+    // Spotify — первая вкладка, только в режиме Spotify
     if (source === 'spotify') {
-        const $sec = $('<div class="mt-pl-section mt-pl-section-spotify"><div class="mt-pl-section-title"><i class="fa-brands fa-spotify"></i> Spotify</div><div class="mt-pl-section-body"><div class="mt-queue-empty"><i class="fa-solid fa-spinner fa-spin"></i> Загрузка...</div></div></div>').appendTo($list);
+        const $sec = $('<div class="mt-pl-section mt-pl-section-spotify"><div class="mt-pl-section-title"><span class="mt-pl-section-label"><i class="fa-brands fa-spotify"></i> Spotify</span></div><div class="mt-pl-section-body"><div class="mt-queue-empty"><i class="fa-solid fa-spinner fa-spin"></i> Загрузка...</div></div></div>').appendTo($list);
         fetchSpotifyPlaylists().then(playlists => {
             const $body = $sec.find('.mt-pl-section-body').empty();
             if (!playlists || !playlists.length) { $body.append('<div class="mt-queue-empty">Плейлистов Spotify нет</div>'); return; }
@@ -920,7 +950,7 @@ async function renderPlaylistsList() {
     // MoodTube
     const $sec = $(`
         <div class="mt-pl-section mt-pl-section-moodtube">
-            <div class="mt-pl-section-title"><i class="fa-solid fa-compact-disc"></i> MoodTube
+            <div class="mt-pl-section-title"><span class="mt-pl-section-label"><i class="fa-solid fa-compact-disc"></i> MoodTube</span>
                 <span class="mt-pl-section-add moodtube-ctrl" title="Создать плейлист"><i class="fa-solid fa-plus"></i> Создать</span>
             </div>
             <div class="mt-pl-section-body"></div>
@@ -947,6 +977,7 @@ async function renderPlaylistsList() {
             onOk: name => { const pl = mtPlCreate(name); toastr.success(`Плейлист «${pl.name}» создан`); renderPlaylistsList(); return false; },
         });
     });
+    mtTabify($list, 'moodtube_pl_tab');
 }
 
 // --- Панель «Плейлисты»: внутри плейлиста ---
@@ -1039,11 +1070,11 @@ function showAddToPlaylistMenu(track) {
     const isSpotifyTrack = source === 'spotify' && !!plTrack.spotifyUri;
     const target = isSpotifyTrack ? mtSpotifyTarget('plus') : 'moodtube';
 
-    // Spotify — сверху
+    // Spotify — первая вкладка
     if (target !== 'moodtube') {
         const $sec = $(`
             <div class="mt-pl-section mt-pl-section-spotify">
-                <div class="mt-pl-section-title"><i class="fa-brands fa-spotify"></i> Spotify
+                <div class="mt-pl-section-title"><span class="mt-pl-section-label"><i class="fa-brands fa-spotify"></i> Spotify</span>
                     <span class="mt-pl-section-add moodtube-ctrl"><i class="fa-solid fa-plus"></i> Новый</span>
                 </div>
                 <div class="mt-pl-section-body"><div class="mt-queue-empty"><i class="fa-solid fa-spinner fa-spin"></i></div></div>
@@ -1082,12 +1113,12 @@ function showAddToPlaylistMenu(track) {
         });
     }
 
-    // MoodTube — снизу; чекбоксы: повторный клик убирает трек
+    // MoodTube — вторая вкладка; чекбоксы: повторный клик убирает трек
     if (target !== 'spotify') {
         const key = mtTrackKey(plTrack);
         const $sec = $(`
             <div class="mt-pl-section mt-pl-section-moodtube">
-                <div class="mt-pl-section-title"><i class="fa-solid fa-compact-disc"></i> MoodTube
+                <div class="mt-pl-section-title"><span class="mt-pl-section-label"><i class="fa-solid fa-compact-disc"></i> MoodTube</span>
                     <span class="mt-pl-section-add moodtube-ctrl"><i class="fa-solid fa-plus"></i> Новый</span>
                 </div>
                 <div class="mt-pl-section-body"></div>
@@ -1124,6 +1155,7 @@ function showAddToPlaylistMenu(track) {
             });
         });
     }
+    mtTabify($body, 'moodtube_pl_add_tab');
 }
 
 async function searchYouTube(query, isRetry = false) {
@@ -2969,18 +3001,53 @@ async function initializeExtension() {
         .mt-pl-tool:disabled { opacity: 0.4; cursor: default; }
         .mt-pl-track-source { flex-shrink: 0; font-size: 11px; color: #1DB954; }
         .mt-pl-track-remove { flex-shrink: 0; font-size: 12px; color: var(--mt-text-dim, #888); cursor: pointer; padding: 2px 4px; }
-        .mt-pl-inline { display: grid !important; grid-template-columns: minmax(0, 1fr) auto auto !important; gap: 6px; margin: 0 0 8px; }
-        .mt-pl-inline-input {
-            width: 100% !important; min-width: 0 !important; height: 32px !important; margin: 0 !important; box-sizing: border-box !important;
-            padding: 0 10px; border-radius: 8px; border: 1px solid var(--mt-border); outline: none; box-shadow: none;
-            background: var(--mt-bg-input, rgba(0,0,0,0.3)); color: var(--mt-text, #fff); font-size: 13px; font-family: inherit;
+        /* Поле «Создать/Переименовать». Темы таверны любят раздувать input и button (особенно при фокусе на телефоне),
+           поэтому размеры зафиксированы по id и !important. Цвета — через переменные, их тема меняет без !important. */
+        #moodtube-mini-player .mt-pl-inline, #moodtube-add-playlist-modal .mt-pl-inline {
+            display: grid !important; grid-template-columns: minmax(0, 1fr) auto 34px !important; align-items: center !important;
+            gap: 6px !important; width: 100% !important; max-width: 100% !important; box-sizing: border-box !important; margin: 0 0 8px !important; padding: 0 !important;
         }
-        .mt-pl-inline-input:focus { border-color: var(--mt-accent); }
-        .mt-pl-inline-ok, .mt-pl-inline-cancel {
-            height: 32px; margin: 0; padding: 0 10px; box-sizing: border-box; border: none; border-radius: 8px; cursor: pointer; font-size: 12px; font-family: inherit;
+        #moodtube-mini-player .mt-pl-inline .mt-pl-inline-input,
+        #moodtube-add-playlist-modal .mt-pl-inline .mt-pl-inline-input,
+        #moodtube-mini-player .mt-pl-inline .mt-pl-inline-input:focus,
+        #moodtube-add-playlist-modal .mt-pl-inline .mt-pl-inline-input:focus,
+        #moodtube-mini-player .mt-pl-inline .mt-pl-inline-input:focus-visible,
+        #moodtube-add-playlist-modal .mt-pl-inline .mt-pl-inline-input:focus-visible {
+            display: block !important; flex: none !important; width: 100% !important; min-width: 0 !important; max-width: 100% !important;
+            height: 34px !important; margin: 0 !important; padding: 0 10px !important; box-sizing: border-box !important;
+            border: 1px solid var(--mt-pl-input-border, var(--mt-border)) !important; border-radius: 8px !important;
+            outline: none !important; box-shadow: none !important; transform: none !important; scale: none !important; zoom: 1 !important; animation: none !important;
+            background: var(--mt-pl-input-bg, var(--mt-bg-input, rgba(0,0,0,0.3))) !important; color: var(--mt-text, #fff) !important;
+            font-size: 14px !important; line-height: 32px !important; font-family: inherit; transition: border-color .15s ease !important;
         }
+        #moodtube-mini-player .mt-pl-inline .mt-pl-inline-input:focus,
+        #moodtube-add-playlist-modal .mt-pl-inline .mt-pl-inline-input:focus,
+        #moodtube-mini-player .mt-pl-inline .mt-pl-inline-input:focus-visible,
+        #moodtube-add-playlist-modal .mt-pl-inline .mt-pl-inline-input:focus-visible { border-color: var(--mt-accent) !important; }
+        #moodtube-mini-player .mt-pl-inline button, #moodtube-add-playlist-modal .mt-pl-inline button {
+            display: flex !important; align-items: center !important; justify-content: center !important; flex: none !important;
+            height: 34px !important; min-width: 0 !important; width: auto !important; margin: 0 !important; padding: 0 12px !important; box-sizing: border-box !important;
+            border: none !important; border-radius: 8px !important; box-shadow: none !important; transform: none !important;
+            font-size: 13px !important; line-height: 1 !important; white-space: nowrap !important; cursor: pointer; font-family: inherit;
+        }
+        #moodtube-mini-player .mt-pl-inline .mt-pl-inline-cancel, #moodtube-add-playlist-modal .mt-pl-inline .mt-pl-inline-cancel { width: 34px !important; padding: 0 !important; }
         .mt-pl-inline-ok { background: var(--mt-accent); color: var(--mt-text-on-accent, #111827); font-weight: 600; }
         .mt-pl-inline-cancel { background: rgba(255,255,255,0.08); color: var(--mt-text, #fff); }
+        .mt-pl-inline button:disabled { opacity: 0.6; }
+
+        /* Вкладки Spotify | MoodTube */
+        .mt-pl-tabs { display: flex; gap: 4px; padding: 3px; margin-bottom: 10px; border-radius: 10px; background: rgba(0,0,0,0.25); }
+        .mt-pl-tab {
+            flex: 1 1 0; min-width: 0; display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+            height: 30px; margin: 0; padding: 0 8px; box-sizing: border-box; border: none; border-radius: 8px; cursor: pointer;
+            background: transparent; color: var(--mt-text-dim, #888); font-size: 12px; font-weight: 600; font-family: inherit;
+            white-space: nowrap; overflow: hidden; text-overflow: ellipsis; transition: background 0.2s, color 0.2s;
+        }
+        .mt-pl-tab.mt-is-active { background: var(--mt-accent); color: var(--mt-text-on-accent, #111827); }
+        .mt-pl-tab[data-mt-tab="spotify"].mt-is-active { background: var(--mt-pl-spotify-tab, #1DB954); color: var(--mt-pl-spotify-tab-text, #000); }
+        .mt-pl-tabbed .mt-pl-section-label { display: none; }
+        .mt-pl-tabbed .mt-pl-section-title-empty { display: none; }
+        .mt-pl-tabbed .mt-pl-section-add { margin-left: auto; }
         .mt-btn-favorite.mt-is-active { color: var(--mt-accent); }
 
         /* Окно «Добавить в плейлист» */

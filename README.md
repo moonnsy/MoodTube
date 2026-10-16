@@ -71,10 +71,10 @@
 * ❤ **Сердечко** добавляет играющий трек в «Любимые», повторное нажатие убирает.
 * ➕ **Плюсик** у трека в очереди открывает окно «Добавить в плейлист». Там можно отметить нужные плейлисты галочками или сразу создать новый.
 * Кнопка **«Плейлисты»** в шапке очереди открывает список плейлистов. В любой можно зайти: там треки, «Слушать», «Перемешать», переименование и удаление. Плейлист заменяет текущую очередь.
-* **В режиме Spotify** сверху показываются плейлисты Spotify, а под ними плейлисты MoodTube. В «Настройки → API → Spotify» можно выбрать, куда сохраняет сердечко и какие разделы показывает плюсик: Spotify и MoodTube, только Spotify или только MoodTube.
+* **В режиме Spotify** в панели и в окне плюсика две вкладки: Spotify слева и MoodTube справа. Выбранная вкладка запоминается. В «Настройки → API → Spotify» можно выбрать, куда сохраняет сердечко и какие разделы показывает плюсик: Spotify и MoodTube, только Spotify или только MoodTube.
 * Трек, добавленный в одном режиме, играет и в другом: если в плейлисте нет его id для текущего режима, MoodTube найдёт трек по названию.
 
-Классы для тем: `.mt-pl-section` (`-spotify` / `-moodtube`), `.mt-pl-section-title`, `.mt-pl-section-add`, `.mt-playlist-item` (`.mt-playlist-fav`), `.mt-pl-cover`, `.mt-pl-count`, `.mt-pl-toolbar` > `.mt-pl-tool` (`.mt-pl-play` / `.mt-pl-shuffle` / `.mt-pl-rename` / `.mt-pl-delete`), `.mt-pl-track` (`.mt-pl-track-remove`), `.mt-pl-inline` (поле создания и переименования), окно `.mt-pl-modal` > `.mt-pl-modal-box` > `.mt-pl-option` (`.mt-is-added`). Закрашенное сердечко — `.mt-btn-favorite.mt-is-active`.
+Классы для тем: `.mt-pl-section` (`-spotify` / `-moodtube`), `.mt-pl-section-title`, `.mt-pl-section-add`, `.mt-playlist-item` (`.mt-playlist-fav`), `.mt-pl-cover`, `.mt-pl-count`, `.mt-pl-toolbar` > `.mt-pl-tool` (`.mt-pl-play` / `.mt-pl-shuffle` / `.mt-pl-rename` / `.mt-pl-delete`), `.mt-pl-track` (`.mt-pl-track-remove`), `.mt-pl-inline` (поле создания и переименования), окно `.mt-pl-modal` > `.mt-pl-modal-box` > `.mt-pl-option` (`.mt-is-added`), вкладки `.mt-pl-tabs` > `.mt-pl-tab` (`.mt-is-active`, `[data-mt-tab="spotify|moodtube"]`). Закрашенное сердечко — `.mt-btn-favorite.mt-is-active`.
 
 ---
 
