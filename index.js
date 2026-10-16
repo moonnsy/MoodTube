@@ -2544,11 +2544,12 @@ async function initializeExtension() {
         .mt-panel-search { background: linear-gradient(var(--mt-bg-primary), var(--mt-bg-primary)), var(--mt-bg-solid, #10151c) !important; backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); }
         .mt-panel-search .mt-panel-header { padding-right: 88px; min-height: 22px; }
         .mt-btn-search.mt-is-open { color: var(--mt-accent) !important; }
-        /* Поле и кнопка строго внутри панели: глобальные стили Таверны для input (ширина, отступы) здесь отключены. */
-        .mt-panel-search .mt-search-row { display: flex; align-items: stretch; gap: 8px; width: 100%; box-sizing: border-box; margin-top: 4px; }
-        .mt-panel-search .mt-search-row input { flex: 1 1 auto; width: 0 !important; min-width: 0 !important; max-width: none !important; height: 40px !important; margin: 0 !important; box-sizing: border-box !important; padding: 0 12px !important; border-radius: 8px !important; border: 1px solid var(--mt-border, rgba(255,255,255,.15)) !important; background: var(--mt-bg-secondary, rgba(255,255,255,.06)) !important; color: var(--mt-text, #fff) !important; font-size: 15px !important; outline: none; }
-        .mt-panel-search .mt-search-row input:focus { border-color: var(--mt-accent) !important; }
-        .mt-panel-search .mt-search-row button { flex: none; width: 44px; height: 40px; margin: 0 !important; padding: 0 !important; box-sizing: border-box; border: none; border-radius: 8px; background: var(--mt-accent); color: #000; font-size: 15px; cursor: pointer; display: flex; align-items: center; justify-content: center; }
+        /* Поле и кнопка строго внутри панели. Селекторы по id и !important: свои темы (в т.ч. CSS из темы Таверны)
+           и общие стили Таверны для input не могут растянуть поле. Сетка: поле занимает остаток, кнопка — 44px. */
+        #moodtube-search-container .mt-search-row { display: grid !important; grid-template-columns: minmax(0, 1fr) 44px !important; gap: 8px !important; width: 100% !important; max-width: 100% !important; box-sizing: border-box !important; margin: 4px 0 0 !important; padding: 0 !important; }
+        #moodtube-search-container #moodtube-search-input { display: block !important; width: 100% !important; min-width: 0 !important; max-width: 100% !important; height: 40px !important; margin: 0 !important; box-sizing: border-box !important; padding: 0 12px !important; border-radius: 8px !important; border: 1px solid var(--mt-border, rgba(255,255,255,.15)) !important; background: var(--mt-bg-secondary, rgba(255,255,255,.06)) !important; color: var(--mt-text, #fff) !important; font-size: 15px !important; line-height: 38px !important; outline: none !important; box-shadow: none !important; flex: none !important; }
+        #moodtube-search-container #moodtube-search-input:focus { border-color: var(--mt-accent) !important; }
+        #moodtube-search-container #moodtube-search-go { width: 44px !important; min-width: 0 !important; height: 40px !important; margin: 0 !important; padding: 0 !important; box-sizing: border-box !important; border: none !important; border-radius: 8px !important; background: var(--mt-accent) !important; color: #000 !important; font-size: 15px !important; cursor: pointer; display: flex !important; align-items: center; justify-content: center; }
         .mt-panel-search .mt-search-hint { margin-top: 8px; font-size: 12px; color: var(--mt-text-dim, #888); }
         .mt-btn-close { right: 15px; }
 
