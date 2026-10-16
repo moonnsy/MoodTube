@@ -2540,6 +2540,9 @@ async function initializeExtension() {
         .mt-window-btn { position: absolute; top: 12px; z-index: 5; color: var(--mt-text-dim, #888); font-size: 16px; }
         .mt-btn-settings { right: 40px; }
         .mt-btn-search { right: 65px; }
+        /* Панель поиска непрозрачная (у некоторых тем фон полупрозрачный), шапка не залезает под кнопки окна. */
+        .mt-panel-search { background: linear-gradient(var(--mt-bg-primary), var(--mt-bg-primary)), var(--mt-bg-solid, #10151c) !important; backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); }
+        .mt-panel-search .mt-panel-header { padding-right: 88px; }
         .mt-panel-search .mt-search-row { display: flex; gap: 6px; margin-top: 10px; }
         .mt-panel-search input { flex: 1; min-width: 0; padding: 8px 10px; border-radius: 6px; border: 1px solid var(--mt-border, rgba(255,255,255,.15)); background: var(--mt-bg-secondary, rgba(255,255,255,.06)); color: var(--mt-text, #fff); font-size: 14px; }
         .mt-panel-search button { padding: 8px 12px; border: none; border-radius: 6px; background: var(--mt-accent); color: #000; font-weight: bold; cursor: pointer; }
