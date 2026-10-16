@@ -1,7 +1,7 @@
 
 
-import { getContext } from '../../../extensions.js';
-import { generateRaw, eventSource, event_types } from '../../../../script.js';
+import { getContext, extension_settings } from '../../../extensions.js';
+import { generateRaw, eventSource, event_types, saveSettingsDebounced } from '../../../../script.js';
 
 if (!localStorage.getItem('moodtube_spotify_scopes_v3')) {
     localStorage.removeItem('moodtube_spotify_token');
@@ -557,43 +557,6 @@ async function fetchSpotifyUser() {
     return null;
 }
 
-async function showSpotifyPlaylists() {
-    $('#moodtube-inner-content').hide();
-    $('#moodtube-queue-container').hide();
-    $('#moodtube-btn-close').hide();
-    $('#moodtube-spotify-playlists-container').css('display', 'flex');
-    
-    const $list = $('#moodtube-playlists-list');
-    $list.empty().append('<div style="text-align:center; padding:10px;"><i class="fa-solid fa-spinner fa-spin"></i> Загрузка...</div>');
-    
-    try {
-        const playlists = await fetchSpotifyPlaylists();
-        $list.empty();
-        
-        if (!playlists || playlists.length === 0) {
-            $list.append('<div class="mt-queue-empty">Плейлисты не найдены. Создайте новый в меню трека.</div>');
-            return;
-        }
-        
-        playlists.forEach(pl => {
-            if (!pl || !pl.id) return;
-            const imgUrl = (pl.images && pl.images.length > 0) ? pl.images[0].url : 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
-            const $item = $(`
-                <div class="mt-queue-item mt-playlist-item">
-                    <img class="mt-queue-thumb" src="${mtEscapeHtml(imgUrl)}">
-                    <span class="mt-queue-title mt-playlist-title">${mtEscapeHtml(pl.name || 'Без названия')}</span>
-                </div>
-            `);
-            $item.on('click', () => {
-                playSpotifyPlaylist(`spotify:playlist:${pl.id}`, pl.name || 'Без названия');
-            });
-            $list.append($item);
-        });
-    } catch(err) {
-        $list.empty().append('<div style="font-size:12px; color:#f55; text-align:center; padding:10px;">Ошибка загрузки плейлистов.</div>');
-        console.error(err);
-    }
-}
 
 async function playSpotifyPlaylist(uri, name) {
     const token = await refreshSpotifyToken();
@@ -613,166 +576,554 @@ async function playSpotifyPlaylist(uri, name) {
     }).catch(e => { console.error(e); toastr.error("Ошибка при включении плейлиста"); });
 }
 
-function showSpotifyAddToPlaylistMenu(track) {
-    if ($('#moodtube-add-playlist-modal').length === 0) {
-        $(`
-        <div id="moodtube-add-playlist-modal" style="display:none; position:fixed; top:0; left:0; width:100vw; height:100vh; background:rgba(0,0,0,0.6); z-index:9999999; justify-content:center; align-items:center; backdrop-filter:blur(5px);">
-            <div style="background:var(--mt-bg-primary); border:1px solid var(--mt-border); border-radius:12px; width:300px; max-height:80vh; display:flex; flex-direction:column; box-shadow:0 10px 30px rgba(0,0,0,0.5);">
-                <div style="padding:15px; border-bottom:1px solid var(--mt-border); display:flex; justify-content:space-between; align-items:center;">
-                    <span style="font-weight:bold; color:#fff;">Добавить в плейлист</span>
-                    <i class="fa-solid fa-xmark moodtube-ctrl" id="moodtube-close-add-modal" style="cursor:pointer; color:#888;"></i>
-                </div>
-                <div style="padding:10px; border-bottom:1px solid var(--mt-border);">
-                    <button id="moodtube-btn-create-new-pl" style="width:100%; padding:8px; background:var(--mt-accent); color:#000; border:none; border-radius:5px; cursor:pointer; font-weight:bold;">+ Создать новый</button>
-                </div>
-                <div id="moodtube-add-playlists-list" style="flex:1; overflow-y:auto; padding:10px;">
-                </div>
-            </div>
-        </div>
-        `).appendTo('body');
+// ============================================================
+//  ПЛЕЙЛИСТЫ MOODTUBE
+//  Хранятся в extension_settings (settings.json на сервере таверны),
+//  поэтому общие для всех устройств, а не в браузере.
+// ============================================================
+const MT_FAV_ID = 'favorites';
 
-        $('#moodtube-close-add-modal').on('click', () => {
-            $('#moodtube-add-playlist-modal').hide();
-        });
+function mtPlStore() {
+    if (!extension_settings.moodtube || typeof extension_settings.moodtube !== 'object') extension_settings.moodtube = {};
+    const st = extension_settings.moodtube;
+    if (!Array.isArray(st.playlists)) st.playlists = [];
+    if (!st.playlists.some(p => p && p.id === MT_FAV_ID)) {
+        st.playlists.unshift({ id: MT_FAV_ID, name: 'Любимые', tracks: [], createdAt: Date.now() });
+    }
+    st.playlists = st.playlists.filter(p => p && p.id && Array.isArray(p.tracks));
+    return st.playlists;
+}
 
-        $('#moodtube-add-playlist-modal').on('click', (e) => {
-            if (e.target.id === 'moodtube-add-playlist-modal') {
-                $('#moodtube-add-playlist-modal').hide();
-            }
+function mtPlSave() {
+    try { saveSettingsDebounced(); } catch (e) { console.error(`${LOG_PREFIX} Playlist save failed`, e); }
+}
+
+function mtPlGet(id) {
+    return mtPlStore().find(p => p.id === id) || null;
+}
+
+function mtPlCreate(name) {
+    const pl = { id: 'pl_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6), name: String(name).trim() || 'Плейлист', tracks: [], createdAt: Date.now() };
+    mtPlStore().push(pl);
+    mtPlSave();
+    return pl;
+}
+
+function mtPlRename(id, name) {
+    const pl = mtPlGet(id);
+    if (!pl || id === MT_FAV_ID || !String(name).trim()) return false;
+    pl.name = String(name).trim();
+    mtPlSave();
+    return true;
+}
+
+function mtPlDelete(id) {
+    if (id === MT_FAV_ID) return false;
+    const st = mtPlStore();
+    const i = st.findIndex(p => p.id === id);
+    if (i < 0) return false;
+    st.splice(i, 1);
+    mtPlSave();
+    return true;
+}
+
+// Трек из очереди → запись плейлиста. YouTube хранит videoId, Spotify — uri; query нужен,
+// чтобы найти трек заново, если плейлист слушают в другом режиме.
+function mtToPlaylistTrack(track) {
+    if (!track) return null;
+    const title = String(track.title || track.originalQuery || '').replace(/^(Ищем: |❌ Не найдено: |❌ Заблокировано: )/, '').trim();
+    if (!title && !track.videoId) return null;
+    const query = String(track.originalQuery || title).trim();
+    const thumbnail = track.videoThumbnails?.[0]?.url || '';
+    const id = String(track.videoId || '');
+    if (id.startsWith('spotify:track:')) return { spotifyUri: id, title, query: title || query, thumbnail, addedAt: Date.now() };
+    if (id && !id.startsWith('spotify:')) return { videoId: id, title, query, thumbnail: `https://i.ytimg.com/vi/${id}/mqdefault.jpg`, addedAt: Date.now() };
+    return { title, query, thumbnail, addedAt: Date.now() };
+}
+
+function mtTrackKey(t) {
+    if (!t) return '';
+    if (t.videoId && !String(t.videoId).startsWith('spotify:')) return 'yt:' + t.videoId;
+    if (t.spotifyUri) return 'sp:' + t.spotifyUri;
+    if (t.videoId) return 'sp:' + t.videoId;
+    return 'q:' + String(t.title || t.query || '').toLowerCase().replace(/\s+/g, ' ').trim();
+}
+
+function mtPlHas(pl, key) {
+    return !!pl && pl.tracks.some(t => mtTrackKey(t) === key);
+}
+
+function mtPlAdd(id, plTrack) {
+    const pl = mtPlGet(id);
+    if (!pl || !plTrack) return false;
+    if (mtPlHas(pl, mtTrackKey(plTrack))) return false;
+    pl.tracks.push(plTrack);
+    mtPlSave();
+    return true;
+}
+
+function mtPlRemove(id, key) {
+    const pl = mtPlGet(id);
+    if (!pl) return false;
+    const before = pl.tracks.length;
+    pl.tracks = pl.tracks.filter(t => mtTrackKey(t) !== key);
+    if (pl.tracks.length === before) return false;
+    mtPlSave();
+    return true;
+}
+
+function mtCurrentTrack() {
+    return (currentQueueIndex >= 0 && currentQueueIndex < trackQueue.length) ? trackQueue[currentQueueIndex] : null;
+}
+
+// Сердечко закрашено, если текущий трек есть в «Любимых» MoodTube
+function updateFavoriteButton() {
+    const t = mtCurrentTrack();
+    const fav = mtPlGet(MT_FAV_ID);
+    const on = !!t && mtPlHas(fav, mtTrackKey(mtToPlaylistTrack(t)));
+    $('#moodtube-btn-favorite').toggleClass('fa-solid', on).toggleClass('fa-regular', !on).toggleClass('mt-is-active', on);
+}
+
+// Куда сохраняют ❤ и «+» в режиме Spotify: 'both' | 'spotify' | 'moodtube'
+function mtSpotifyTarget(kind) {
+    const v = localStorage.getItem(kind === 'fav' ? 'moodtube_fav_target' : 'moodtube_plus_target');
+    return ['both', 'spotify', 'moodtube'].includes(v) ? v : 'both';
+}
+
+async function spotifySaveToLibrary(uri) {
+    const token = await refreshSpotifyToken();
+    if (!token) return false;
+    try {
+        const res = await fetch(`https://api.spotify.com/v1/me/library?uris=${encodeURIComponent(uri)}`, { method: 'PUT', headers: { Authorization: `Bearer ${token}` } });
+        if (!res.ok) {
+            const err = await res.json().catch(() => ({}));
+            toastr.error('Spotify: ' + (err.error?.message || 'Ошибка сохранения в любимые'));
+        }
+        return res.ok;
+    } catch (e) { console.error(e); return false; }
+}
+
+async function spotifyAddToPlaylist(playlistId, uri) {
+    const token = await refreshSpotifyToken();
+    if (!token) return false;
+    try {
+        const res = await fetch(`https://api.spotify.com/v1/playlists/${playlistId}/items?uris=${encodeURIComponent(uri)}`, { method: 'POST', headers: { Authorization: `Bearer ${token}` } });
+        if (!res.ok) {
+            const err = await res.json().catch(() => ({}));
+            toastr.error('Spotify: ' + (err.error?.message || 'Не удалось добавить'));
+        }
+        return res.ok;
+    } catch (e) { console.error(e); return false; }
+}
+
+async function spotifyCreatePlaylist(name) {
+    const userId = await fetchSpotifyUser();
+    const token = await refreshSpotifyToken();
+    if (!userId || !token) { toastr.error('Spotify: не удалось получить аккаунт'); return null; }
+    try {
+        const res = await fetch(`https://api.spotify.com/v1/me/playlists`, {
+            method: 'POST',
+            body: JSON.stringify({ name, public: false }),
+            headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
         });
+        if (!res.ok) {
+            const err = await res.json().catch(() => ({}));
+            toastr.error('Spotify: ' + (err.error?.message || 'Ошибка создания плейлиста'));
+            return null;
+        }
+        const newPl = await res.json();
+        let localPls = [];
+        try { localPls = JSON.parse(localStorage.getItem('moodtube_local_playlists') || '[]'); } catch (e) {}
+        localPls.push({ id: newPl.id, name: newPl.name });
+        localStorage.setItem('moodtube_local_playlists', JSON.stringify(localPls));
+        return newPl;
+    } catch (e) { console.error(e); toastr.error('Сетевая ошибка при создании плейлиста'); return null; }
+}
+
+async function toggleFavoriteCurrent() {
+    const track = mtCurrentTrack();
+    if (!track) { toastr.warning('Нет активного трека'); return; }
+    const plTrack = mtToPlaylistTrack(track);
+    if (!plTrack) { toastr.warning('Трек ещё не найден'); return; }
+
+    const source = localStorage.getItem('moodtube_playback_source') || 'youtube';
+    const isSpotifyTrack = source === 'spotify' && String(track.videoId || '').startsWith('spotify:track:');
+    const target = isSpotifyTrack ? mtSpotifyTarget('fav') : 'moodtube';
+    const key = mtTrackKey(plTrack);
+    const aiName = `${track.title} ${track.artist || track.Artist || ''}`.trim();
+
+    // Повторное нажатие убирает из «Любимых» MoodTube (в Spotify ничего не удаляем)
+    if (target !== 'spotify' && mtPlHas(mtPlGet(MT_FAV_ID), key)) {
+        mtPlRemove(MT_FAV_ID, key);
+        const fav = getMtSetting('favorites');
+        if (fav.includes(aiName)) {
+            const rest = fav.split(',').map(s => s.trim()).filter(s => s && s !== aiName).join(', ');
+            saveMtSetting('favorites', rest);
+            $('#moodtube-setting-favorites-list').val(rest);
+        }
+        updateFavoriteButton();
+        toastr.info('Убрано из «Любимых» MoodTube');
+        return;
     }
 
-    const spotifyId = track.videoId.split(':')[2];
-    $('#moodtube-add-playlist-modal').css('display', 'flex');
-    
-    $('#moodtube-create-pl-view').hide();
-    $('#moodtube-add-playlists-list').show();
-    $('#moodtube-btn-create-new-pl').show();
-    $('#moodtube-new-pl-name').val('');
-    
-    const $list = $('#moodtube-add-playlists-list');
-    $list.empty().append('<div style="text-align:center; padding:10px;"><i class="fa-solid fa-spinner fa-spin"></i></div>');
+    const done = [];
+    if (target !== 'spotify') {
+        mtPlAdd(MT_FAV_ID, plTrack);
+        done.push('Любимые MoodTube');
+    }
+    // Избранное для подсказок ИИ (как раньше)
+    let favList = getMtSetting('favorites');
+    if (aiName && !favList.includes(aiName)) {
+        favList = favList ? favList + ', ' + aiName : aiName;
+        saveMtSetting('favorites', favList);
+        $('#moodtube-setting-favorites-list').val(favList);
+    }
+    if (target !== 'moodtube' && isSpotifyTrack) {
+        if (await spotifySaveToLibrary(track.videoId)) done.push('любимые Spotify');
+    }
+    updateFavoriteButton();
+    if (target === 'spotify' && done.length) $('#moodtube-btn-favorite').removeClass('fa-regular').addClass('fa-solid');
+    if (done.length) toastr.success(`❤ Сохранено: ${done.join(' и ')}`);
+}
 
-    fetchSpotifyPlaylists().then(playlists => {
-        $list.empty();
-        
-        if (!playlists || playlists.length === 0) {
-            $list.append('<div style="text-align:center; padding:10px; color:#888; font-size:13px;">Нет сохраненных плейлистов.</div>');
-            return;
+// Слушать плейлист MoodTube: заменяет очередь его треками
+function playMoodTubePlaylist(id, startIndex = 0, shuffle = false) {
+    const pl = mtPlGet(id);
+    if (!pl || !pl.tracks.length) { toastr.info('Плейлист пуст'); return; }
+    const source = localStorage.getItem('moodtube_playback_source') || 'youtube';
+    let tracks = pl.tracks.slice();
+    if (shuffle) {
+        for (let i = tracks.length - 1; i > 0; i--) {
+            const j = Math.floor(Math.random() * (i + 1));
+            [tracks[i], tracks[j]] = [tracks[j], tracks[i]];
         }
-        try {
+        startIndex = 0;
+    }
+    const objs = tracks.map(t => {
+        const thumbs = t.thumbnail ? [{ url: t.thumbnail }] : [];
+        const query = t.query || t.title;
+        if (source === 'spotify' && t.spotifyUri) return { title: t.title, originalQuery: query, videoId: t.spotifyUri, videoThumbnails: thumbs, isValidated: true };
+        if (source !== 'spotify' && t.videoId) return { title: t.title, originalQuery: query, videoId: t.videoId, videoThumbnails: thumbs, isValidated: true };
+        return { title: 'Ищем: ' + query, originalQuery: query, videoId: null, isSearching: true };
+    });
+
+    if (ytPlayer && typeof ytPlayer.stopVideo === 'function') ytPlayer.stopVideo();
+    if (audioFallback) { audioFallback.pause(); isUsingAudioFallback = false; }
+    isCurrentlyPlaying = false;
+    window.isSpotifyPlaylistActive = false;
+
+    trackQueue = objs;
+    currentQueueIndex = Math.min(Math.max(startIndex, 0), objs.length - 1);
+    updateQueueUI();
+    const first = objs[currentQueueIndex];
+    if (first.videoId) playTrack(first);
+    else $('#moodtube-widget-title').text(first.title);
+    resolveQueueBackground();
+
+    // Возвращаемся к плееру
+    $('#moodtube-spotify-playlists-container').hide();
+    $('#moodtube-queue-container').hide();
+    $('#moodtube-inner-content').css('display', '');
+    $('#moodtube-btn-close').show();
+    toastr.success(`Плейлист «${pl.name}»: ${objs.length} ${shuffle ? 'треков вперемешку' : 'треков'}`);
+}
+
+// Поле ввода прямо в списке (создать / переименовать) — без системных prompt()
+function mtInlineInput($anchor, { placeholder = '', value = '', okText = 'OK', onOk }) {
+    $anchor.siblings('.mt-pl-inline').remove();
+    const $row = $(`
+        <div class="mt-pl-inline">
+            <input type="text" class="mt-pl-inline-input moodtube-ctrl" autocomplete="off">
+            <button class="mt-pl-inline-ok moodtube-ctrl"></button>
+            <button class="mt-pl-inline-cancel moodtube-ctrl" title="Отмена"><i class="fa-solid fa-xmark"></i></button>
+        </div>`);
+    $row.find('input').attr('placeholder', placeholder).val(value);
+    $row.find('.mt-pl-inline-ok').text(okText);
+    const submit = async () => {
+        const v = String($row.find('input').val() || '').trim();
+        if (!v) return;
+        $row.find('button').prop('disabled', true);
+        const keep = await onOk(v);
+        if (!keep) $row.remove();
+        else $row.find('button').prop('disabled', false);
+    };
+    $row.find('.mt-pl-inline-ok').on('click', submit);
+    $row.find('.mt-pl-inline-cancel').on('click', () => $row.remove());
+    $row.find('input').on('keydown', e => {
+        if (e.key === 'Enter') { e.preventDefault(); submit(); }
+        if (e.key === 'Escape') { e.preventDefault(); $row.remove(); }
+    });
+    $row.insertAfter($anchor);
+    setTimeout(() => $row.find('input').trigger('focus'), 30);
+    return $row;
+}
+
+function mtPlaylistCover(pl) {
+    if (pl.id === MT_FAV_ID) return '<span class="mt-pl-cover mt-pl-cover-fav"><i class="fa-solid fa-heart"></i></span>';
+    const t = pl.tracks[0];
+    if (!t) return '<span class="mt-pl-cover mt-pl-cover-empty"><i class="fa-solid fa-music"></i></span>';
+    return '<img class="mt-queue-thumb mt-pl-cover" alt="">';
+}
+
+function mtTracksWord(n) {
+    const m10 = n % 10, m100 = n % 100;
+    if (m10 === 1 && m100 !== 11) return `${n} трек`;
+    if (m10 >= 2 && m10 <= 4 && (m100 < 12 || m100 > 14)) return `${n} трека`;
+    return `${n} треков`;
+}
+
+function mtSetPlaylistsHeader(title, showBack) {
+    $('#moodtube-playlists-title').text(title);
+    $('#moodtube-btn-playlists-back').toggle(!!showBack);
+}
+
+// --- Панель «Плейлисты»: список ---
+async function showSpotifyPlaylists() { return showPlaylistsPanel(); }
+
+async function showPlaylistsPanel() {
+    $('#moodtube-inner-content').hide();
+    $('#moodtube-queue-container').hide();
+    $('#moodtube-btn-close').hide();
+    $('#moodtube-spotify-playlists-container').css('display', 'flex');
+    await renderPlaylistsList();
+}
+
+async function renderPlaylistsList() {
+    mtSetPlaylistsHeader('Плейлисты', false);
+    const $list = $('#moodtube-playlists-list').empty();
+    const source = localStorage.getItem('moodtube_playback_source') || 'youtube';
+
+    // Spotify — сверху, только в режиме Spotify
+    if (source === 'spotify') {
+        const $sec = $('<div class="mt-pl-section mt-pl-section-spotify"><div class="mt-pl-section-title"><i class="fa-brands fa-spotify"></i> Spotify</div><div class="mt-pl-section-body"><div class="mt-queue-empty"><i class="fa-solid fa-spinner fa-spin"></i> Загрузка...</div></div></div>').appendTo($list);
+        fetchSpotifyPlaylists().then(playlists => {
+            const $body = $sec.find('.mt-pl-section-body').empty();
+            if (!playlists || !playlists.length) { $body.append('<div class="mt-queue-empty">Плейлистов Spotify нет</div>'); return; }
             playlists.forEach(pl => {
                 if (!pl || !pl.id) return;
                 const $item = $(`
-                    <div style="padding:10px; border-radius:5px; cursor:pointer; color:#fff; font-size:13px; margin-bottom:5px; background:rgba(255,255,255,0.05);">
-                        ${pl.name || 'Без названия'}
-                    </div>
-                `);
-                $item.on('click', async () => {
-                    const token = await refreshSpotifyToken();
-                    if (token) {
-                        try {
-                            const uriParam = encodeURIComponent(track.videoId);
-                            const res = await fetch(`https://api.spotify.com/v1/playlists/${pl.id}/items?uris=${uriParam}`, {
-                                method: 'POST',
-                                headers: { Authorization: `Bearer ${token}` }
-                            });
-                            if (res.ok) {
-                                toastr.success(`Трек добавлен в "${pl.name}"`);
-                                $('#moodtube-add-playlist-modal').hide();
-                            } else {
-                                const err = await res.json().catch(()=>({}));
-                                toastr.error("Spotify: " + (err.error?.message || "Не удалось добавить"));
-                            }
-                        } catch(e) { console.error(e); }
-                    }
-                });
-                $list.append($item);
+                    <div class="mt-queue-item mt-playlist-item mt-playlist-spotify">
+                        <img class="mt-queue-thumb" alt="">
+                        <span class="mt-queue-title mt-playlist-title"></span>
+                    </div>`);
+                $item.find('.mt-playlist-title').text(pl.name || 'Без названия');
+                setImgWithFallback($item.find('img')[0], pl.images?.[0]?.url ? [pl.images[0].url] : []);
+                $item.on('click', () => playSpotifyPlaylist(`spotify:playlist:${pl.id}`, pl.name || 'Без названия'));
+                $body.append($item);
             });
-        } catch(err) {
-            $list.append('<div style="text-align:center; padding:10px; color:#f55; font-size:13px;">Ошибка отображения</div>');
-        }
-    });
+        }).catch(err => {
+            console.error(err);
+            $sec.find('.mt-pl-section-body').html('<div class="mt-queue-empty">Ошибка загрузки плейлистов Spotify</div>');
+        });
+    }
 
-    $('#moodtube-btn-create-new-pl').off('click').on('click', async () => {
-        $('#moodtube-add-playlists-list').hide();
-        $('#moodtube-btn-create-new-pl').hide();
-        
-        if ($('#moodtube-create-pl-view').length === 0) {
-            $(`
-            <div id="moodtube-create-pl-view" style="padding:10px; display:flex; flex-direction:column; gap:10px;">
-                <input type="text" id="moodtube-new-pl-name" placeholder="Название плейлиста..." style="padding:8px 10px; border-radius:5px; border:1px solid var(--mt-border); background:var(--mt-bg-input); color:#fff; outline:none; font-family:inherit;">
-                <div style="display:flex; gap:10px;">
-                    <button id="moodtube-btn-cancel-create" style="flex:1; padding:8px; background:rgba(255,255,255,0.1); color:#fff; border:none; border-radius:5px; cursor:pointer;">Отмена</button>
-                    <button id="moodtube-btn-confirm-create" style="flex:1; padding:8px; background:var(--mt-accent); color:#000; border:none; border-radius:5px; cursor:pointer; font-weight:bold;">Создать</button>
-                </div>
+    // MoodTube
+    const $sec = $(`
+        <div class="mt-pl-section mt-pl-section-moodtube">
+            <div class="mt-pl-section-title"><i class="fa-solid fa-compact-disc"></i> MoodTube
+                <span class="mt-pl-section-add moodtube-ctrl" title="Создать плейлист"><i class="fa-solid fa-plus"></i> Создать</span>
             </div>
-            `).insertAfter('#moodtube-add-playlists-list');
-            
-            $('#moodtube-btn-cancel-create').on('click', () => {
-                $('#moodtube-create-pl-view').hide();
-                $('#moodtube-add-playlists-list').show();
-                $('#moodtube-btn-create-new-pl').show();
-                $('#moodtube-new-pl-name').val('');
-            });
-        }
-        
-        $('#moodtube-create-pl-view').show();
-        $('#moodtube-new-pl-name').focus();
-        
-        $('#moodtube-btn-confirm-create').off('click').on('click', async () => {
-            const name = $('#moodtube-new-pl-name').val().trim();
-            if (!name) return;
-            
-            const oldText = $('#moodtube-btn-confirm-create').text();
-            $('#moodtube-btn-confirm-create').text('⏳').prop('disabled', true);
-            
-            const userId = await fetchSpotifyUser();
-            if (!userId) { 
-                toastr.error("Не удалось получить User ID"); 
-                $('#moodtube-btn-confirm-create').text(oldText).prop('disabled', false);
-                return; 
-            }
-            
-            const token = await refreshSpotifyToken();
-            if (token) {
-                try {
-                    const res = await fetch(`https://api.spotify.com/v1/me/playlists`, {
-                        method: 'POST',
-                        body: JSON.stringify({ name: name, public: false }),
-                        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }
-                    });
-                    if (res.ok) {
-                        const newPl = await res.json();
-                        
-                        // Save to local cache
-                        let localPls = [];
-                        try { localPls = JSON.parse(localStorage.getItem('moodtube_local_playlists') || '[]'); } catch(e){}
-                        localPls.push({ id: newPl.id, name: newPl.name });
-                        localStorage.setItem('moodtube_local_playlists', JSON.stringify(localPls));
-                        
-                        const uriParam = encodeURIComponent(track.videoId);
-                        const addRes = await fetch(`https://api.spotify.com/v1/playlists/${newPl.id}/items?uris=${uriParam}`, {
-                            method: 'POST',
-                            headers: { Authorization: `Bearer ${token}` }
-                        });
-                        if (addRes.ok) {
-                            toastr.success(`Плейлист "${name}" создан и трек добавлен!`);
-                            $('#moodtube-add-playlist-modal').hide();
-                            $('#moodtube-btn-cancel-create').trigger('click');
-                        } else {
-                            const err = await addRes.json().catch(()=>({}));
-                            toastr.error("Spotify: " + (err.error?.message || "Не удалось добавить трек"));
-                        }
-                    } else {
-                        const err = await res.json().catch(()=>({}));
-                        toastr.error("Spotify: " + (err.error?.message || "Ошибка создания плейлиста"));
-                    }
-                } catch(e) { console.error(e); toastr.error("Сетевая ошибка при создании плейлиста"); }
-            }
-            $('#moodtube-btn-confirm-create').text(oldText).prop('disabled', false);
+            <div class="mt-pl-section-body"></div>
+        </div>`).appendTo($list);
+    const $body = $sec.find('.mt-pl-section-body');
+    mtPlStore().forEach(pl => {
+        const $item = $(`
+            <div class="mt-queue-item mt-playlist-item mt-playlist-moodtube${pl.id === MT_FAV_ID ? ' mt-playlist-fav' : ''}">
+                ${mtPlaylistCover(pl)}
+                <span class="mt-queue-title mt-playlist-title"></span>
+                <span class="mt-pl-count"></span>
+                <i class="fa-solid fa-chevron-right mt-pl-open"></i>
+            </div>`);
+        $item.find('.mt-playlist-title').text(pl.name);
+        $item.find('.mt-pl-count').text(mtTracksWord(pl.tracks.length));
+        const $img = $item.find('img.mt-pl-cover');
+        if ($img.length) setImgWithFallback($img[0], getTrackThumbCandidates({ videoId: pl.tracks[0].videoId, videoThumbnails: pl.tracks[0].thumbnail ? [{ url: pl.tracks[0].thumbnail }] : [] }, 'default'));
+        $item.on('click', () => renderPlaylistDetail(pl.id));
+        $body.append($item);
+    });
+    $sec.find('.mt-pl-section-add').on('click', function() {
+        mtInlineInput($sec.find('.mt-pl-section-title'), {
+            placeholder: 'Название плейлиста', okText: 'Создать',
+            onOk: name => { const pl = mtPlCreate(name); toastr.success(`Плейлист «${pl.name}» создан`); renderPlaylistsList(); return false; },
         });
     });
+}
+
+// --- Панель «Плейлисты»: внутри плейлиста ---
+function renderPlaylistDetail(id) {
+    const pl = mtPlGet(id);
+    if (!pl) { renderPlaylistsList(); return; }
+    mtSetPlaylistsHeader(pl.name, true);
+    const $list = $('#moodtube-playlists-list').empty();
+    const isFav = id === MT_FAV_ID;
+
+    const $toolbar = $(`
+        <div class="mt-pl-toolbar">
+            <button class="mt-pl-tool mt-pl-play moodtube-ctrl"><i class="fa-solid fa-play"></i> Слушать</button>
+            <button class="mt-pl-tool mt-pl-shuffle moodtube-ctrl" title="Перемешать"><i class="fa-solid fa-shuffle"></i></button>
+            ${isFav ? '' : '<button class="mt-pl-tool mt-pl-rename moodtube-ctrl" title="Переименовать"><i class="fa-solid fa-pen"></i></button><button class="mt-pl-tool mt-pl-delete moodtube-ctrl" title="Удалить плейлист"><i class="fa-solid fa-trash"></i></button>'}
+        </div>`).appendTo($list);
+    $toolbar.find('.mt-pl-play').prop('disabled', !pl.tracks.length).on('click', () => playMoodTubePlaylist(id, 0));
+    $toolbar.find('.mt-pl-shuffle').prop('disabled', pl.tracks.length < 2).on('click', () => playMoodTubePlaylist(id, 0, true));
+    $toolbar.find('.mt-pl-rename').on('click', () => {
+        mtInlineInput($toolbar, {
+            placeholder: 'Новое название', value: pl.name, okText: 'Сохранить',
+            onOk: name => { mtPlRename(id, name); renderPlaylistDetail(id); return false; },
+        });
+    });
+    $toolbar.find('.mt-pl-delete').on('click', () => {
+        if (!confirm(`Удалить плейлист «${pl.name}»? Треки из очереди не пропадут.`)) return;
+        mtPlDelete(id);
+        toastr.info(`Плейлист «${pl.name}» удалён`);
+        renderPlaylistsList();
+    });
+
+    if (!pl.tracks.length) {
+        $list.append(`<div class="mt-queue-empty">${isFav ? 'Пусто. Нажмите ❤ на играющем треке.' : 'Пусто. Добавляйте треки кнопкой «+» в очереди.'}</div>`);
+        return;
+    }
+    pl.tracks.forEach((t, index) => {
+        const $item = $(`
+            <div class="mt-queue-item mt-pl-track">
+                <img class="mt-queue-thumb" alt="">
+                <span class="mt-queue-title"></span>
+                ${t.spotifyUri ? '<i class="fa-brands fa-spotify mt-pl-track-source" title="Трек из Spotify"></i>' : ''}
+                <i class="fa-solid fa-xmark moodtube-ctrl mt-pl-track-remove" title="Убрать из плейлиста"></i>
+            </div>`);
+        $item.find('.mt-queue-title').text(t.title || t.query);
+        setImgWithFallback($item.find('img')[0], getTrackThumbCandidates({ videoId: t.videoId, videoThumbnails: t.thumbnail ? [{ url: t.thumbnail }] : [] }, 'default'));
+        $item.on('click', e => {
+            if ($(e.target).closest('.mt-pl-track-remove').length) return;
+            playMoodTubePlaylist(id, index);
+        });
+        $item.find('.mt-pl-track-remove').on('click', e => {
+            e.stopPropagation();
+            mtPlRemove(id, mtTrackKey(t));
+            if (isFav) updateFavoriteButton();
+            renderPlaylistDetail(id);
+        });
+        $list.append($item);
+    });
+}
+
+// --- «+» в очереди: добавить трек в плейлист ---
+function showSpotifyAddToPlaylistMenu(track) { return showAddToPlaylistMenu(track); }
+
+function showAddToPlaylistMenu(track) {
+    const plTrack = mtToPlaylistTrack(track);
+    if (!plTrack) { toastr.warning('Трек ещё не найден'); return; }
+
+    if ($('#moodtube-add-playlist-modal').length === 0) {
+        $(`
+        <div id="moodtube-add-playlist-modal" class="mt-pl-modal" style="display:none;">
+            <div class="mt-pl-modal-box">
+                <div class="mt-pl-modal-header">
+                    <span class="mt-pl-modal-title">Добавить в плейлист</span>
+                    <i class="fa-solid fa-xmark moodtube-ctrl mt-pl-modal-close" id="moodtube-close-add-modal"></i>
+                </div>
+                <div class="mt-pl-modal-track"></div>
+                <div id="moodtube-add-playlists-list" class="mt-pl-modal-body"></div>
+            </div>
+        </div>
+        `).appendTo('body');
+        $('#moodtube-close-add-modal').on('click', () => $('#moodtube-add-playlist-modal').hide());
+        $('#moodtube-add-playlist-modal').on('click', e => { if (e.target.id === 'moodtube-add-playlist-modal') $('#moodtube-add-playlist-modal').hide(); });
+    }
+
+    const $modal = $('#moodtube-add-playlist-modal');
+    $modal.find('.mt-pl-modal-track').text(plTrack.title || plTrack.query);
+    const $body = $('#moodtube-add-playlists-list').empty();
+    $modal.css('display', 'flex');
+
+    const source = localStorage.getItem('moodtube_playback_source') || 'youtube';
+    const isSpotifyTrack = source === 'spotify' && !!plTrack.spotifyUri;
+    const target = isSpotifyTrack ? mtSpotifyTarget('plus') : 'moodtube';
+
+    // Spotify — сверху
+    if (target !== 'moodtube') {
+        const $sec = $(`
+            <div class="mt-pl-section mt-pl-section-spotify">
+                <div class="mt-pl-section-title"><i class="fa-brands fa-spotify"></i> Spotify
+                    <span class="mt-pl-section-add moodtube-ctrl"><i class="fa-solid fa-plus"></i> Новый</span>
+                </div>
+                <div class="mt-pl-section-body"><div class="mt-queue-empty"><i class="fa-solid fa-spinner fa-spin"></i></div></div>
+            </div>`).appendTo($body);
+        const renderSpotify = () => fetchSpotifyPlaylists().then(playlists => {
+            const $b = $sec.find('.mt-pl-section-body').empty();
+            if (!playlists || !playlists.length) { $b.append('<div class="mt-queue-empty">Плейлистов Spotify нет</div>'); return; }
+            playlists.forEach(pl => {
+                if (!pl || !pl.id) return;
+                const $opt = $('<div class="mt-pl-option moodtube-ctrl"><i class="fa-solid fa-plus mt-pl-option-icon"></i><span class="mt-pl-option-name"></span></div>');
+                $opt.find('.mt-pl-option-name').text(pl.name || 'Без названия');
+                $opt.on('click', async () => {
+                    if ($opt.hasClass('mt-is-busy')) return;
+                    $opt.addClass('mt-is-busy');
+                    if (await spotifyAddToPlaylist(pl.id, plTrack.spotifyUri)) {
+                        $opt.addClass('mt-is-added').find('.mt-pl-option-icon').attr('class', 'fa-solid fa-check mt-pl-option-icon');
+                        toastr.success(`Добавлено в Spotify «${pl.name}»`);
+                    }
+                    $opt.removeClass('mt-is-busy');
+                });
+                $b.append($opt);
+            });
+        });
+        renderSpotify();
+        $sec.find('.mt-pl-section-add').on('click', () => {
+            mtInlineInput($sec.find('.mt-pl-section-title'), {
+                placeholder: 'Новый плейлист Spotify', okText: 'Создать',
+                onOk: async name => {
+                    const newPl = await spotifyCreatePlaylist(name);
+                    if (!newPl) return true;
+                    if (await spotifyAddToPlaylist(newPl.id, plTrack.spotifyUri)) toastr.success(`Плейлист Spotify «${name}» создан, трек добавлен`);
+                    renderSpotify();
+                    return false;
+                },
+            });
+        });
+    }
+
+    // MoodTube — снизу; чекбоксы: повторный клик убирает трек
+    if (target !== 'spotify') {
+        const key = mtTrackKey(plTrack);
+        const $sec = $(`
+            <div class="mt-pl-section mt-pl-section-moodtube">
+                <div class="mt-pl-section-title"><i class="fa-solid fa-compact-disc"></i> MoodTube
+                    <span class="mt-pl-section-add moodtube-ctrl"><i class="fa-solid fa-plus"></i> Новый</span>
+                </div>
+                <div class="mt-pl-section-body"></div>
+            </div>`).appendTo($body);
+        const renderMoodTube = () => {
+            const $b = $sec.find('.mt-pl-section-body').empty();
+            mtPlStore().forEach(pl => {
+                const has = mtPlHas(pl, key);
+                const $opt = $(`<div class="mt-pl-option moodtube-ctrl${has ? ' mt-is-added' : ''}">
+                    <i class="${has ? 'fa-solid fa-square-check' : 'fa-regular fa-square'} mt-pl-option-icon"></i>
+                    <span class="mt-pl-option-name"></span><span class="mt-pl-count"></span></div>`);
+                $opt.find('.mt-pl-option-name').text(pl.name);
+                $opt.find('.mt-pl-count').text(pl.tracks.length);
+                $opt.on('click', () => {
+                    if (mtPlHas(pl, key)) { mtPlRemove(pl.id, key); toastr.info(`Убрано из «${pl.name}»`); }
+                    else { mtPlAdd(pl.id, plTrack); toastr.success(`Добавлено в «${pl.name}»`); }
+                    if (pl.id === MT_FAV_ID) updateFavoriteButton();
+                    renderMoodTube();
+                });
+                $b.append($opt);
+            });
+        };
+        renderMoodTube();
+        $sec.find('.mt-pl-section-add').on('click', () => {
+            mtInlineInput($sec.find('.mt-pl-section-title'), {
+                placeholder: 'Новый плейлист MoodTube', okText: 'Создать',
+                onOk: name => {
+                    const pl = mtPlCreate(name);
+                    mtPlAdd(pl.id, plTrack);
+                    toastr.success(`Плейлист «${pl.name}» создан, трек добавлен`);
+                    renderMoodTube();
+                    return false;
+                },
+            });
+        });
+    }
 }
 
 async function searchYouTube(query, isRetry = false) {
@@ -1591,8 +1942,7 @@ function updateQueueUI(skipSave = false) {
 
     trackQueue.forEach((track, index) => {
         const isCurrent = index === currentQueueIndex;
-        const isSpotifyTrack = track.videoId && track.videoId.startsWith('spotify:');
-        const showSpotifyAdd = isSpotifyTrack && (localStorage.getItem('moodtube_playback_source') === 'spotify');
+        const showSpotifyAdd = !!track.videoId && !track.isSearching && !track.searchFailed && !track.isExhausted;
         const itemClasses = ['moodtube-queue-item', 'mt-queue-item'];
         if (isCurrent) itemClasses.push('mt-is-current');
         if (track.isExhausted) itemClasses.push('mt-is-blocked');
@@ -1602,7 +1952,7 @@ function updateQueueUI(skipSave = false) {
                 <img class="mt-queue-thumb${!track.videoId ? ' mt-is-empty' : ''}" alt="">
                 <span class="mt-queue-title">${track.isExhausted ? '❌ Заблокировано: ' : ''}${mtEscapeHtml(track.title)}</span>
                 ${isCurrent ? '<i class="fa-solid fa-volume-high mt-queue-now"></i>' : ''}
-                ${showSpotifyAdd ? '<div class="moodtube-btn-add-playlist moodtube-ctrl mt-queue-add" title="Добавить в плейлист Spotify"><i class="fa-solid fa-plus"></i></div>' : ''}
+                ${showSpotifyAdd ? '<div class="moodtube-btn-add-playlist moodtube-ctrl mt-queue-add" title="Добавить в плейлист"><i class="fa-solid fa-plus"></i></div>' : ''}
                 <div class="moodtube-btn-dislike moodtube-ctrl mt-queue-dislike" title="Не нравится (В бан-лист)"></div>
             </div>
         `);
@@ -1828,6 +2178,7 @@ function syncPlayerState() {
         .toggleClass('mt-is-paused', state === 'paused')
         .toggleClass('mt-is-idle', state === 'idle');
     $('#moodtube-label-status').text(mtStatusLabels[state] || '');
+    try { updateFavoriteButton(); } catch (e) {}
     if (state !== lastBroadcastState) {
         lastBroadcastState = state;
         window.dispatchEvent(new CustomEvent('moodtube:state', { detail: { state } }));
@@ -2594,6 +2945,70 @@ async function initializeExtension() {
             -webkit-mask: url(https://img.icons8.com/ios-filled/50/dislike.png) no-repeat center / contain;
             mask: url(https://img.icons8.com/ios-filled/50/dislike.png) no-repeat center / contain;
         }
+        /* Плейлисты */
+        .mt-pl-section { margin-bottom: 12px; }
+        .mt-pl-section-title {
+            display: flex; align-items: center; gap: 6px; margin: 2px 2px 6px;
+            font-size: 11px; font-weight: bold; text-transform: uppercase; letter-spacing: 0.5px; color: var(--mt-text-dim, #888);
+        }
+        .mt-pl-section-add { margin-left: auto; cursor: pointer; text-transform: none; letter-spacing: 0; font-weight: 600; color: var(--mt-accent); }
+        .mt-pl-cover { width: 30px; height: 30px; border-radius: 5px; flex-shrink: 0; display: flex; align-items: center; justify-content: center; }
+        .mt-pl-cover-fav { background: var(--mt-accent); color: var(--mt-text-on-accent, #111827); font-size: 13px; }
+        .mt-pl-cover-empty { background: rgba(255,255,255,0.08); color: var(--mt-text-dim, #888); font-size: 12px; }
+        .mt-pl-count { flex-shrink: 0; font-size: 11px; color: var(--mt-text-dim, #888); }
+        .mt-pl-open { flex-shrink: 0; font-size: 10px; color: var(--mt-text-dim, #888); }
+        .mt-pl-back { margin-right: 2px; }
+        .mt-pl-toolbar { display: flex; gap: 6px; margin-bottom: 10px; }
+        .mt-pl-tool {
+            display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+            height: 32px; min-width: 36px; padding: 0 10px; box-sizing: border-box;
+            border: 1px solid var(--mt-border); border-radius: 8px; cursor: pointer;
+            background: rgba(255,255,255,0.06); color: var(--mt-text, #fff); font-size: 12px; font-family: inherit;
+        }
+        .mt-pl-tool.mt-pl-play { flex: 1; background: var(--mt-accent); border-color: var(--mt-accent); color: var(--mt-text-on-accent, #111827); font-weight: 600; }
+        .mt-pl-tool:disabled { opacity: 0.4; cursor: default; }
+        .mt-pl-track-source { flex-shrink: 0; font-size: 11px; color: #1DB954; }
+        .mt-pl-track-remove { flex-shrink: 0; font-size: 12px; color: var(--mt-text-dim, #888); cursor: pointer; padding: 2px 4px; }
+        .mt-pl-inline { display: grid !important; grid-template-columns: minmax(0, 1fr) auto auto !important; gap: 6px; margin: 0 0 8px; }
+        .mt-pl-inline-input {
+            width: 100% !important; min-width: 0 !important; height: 32px !important; margin: 0 !important; box-sizing: border-box !important;
+            padding: 0 10px; border-radius: 8px; border: 1px solid var(--mt-border); outline: none; box-shadow: none;
+            background: var(--mt-bg-input, rgba(0,0,0,0.3)); color: var(--mt-text, #fff); font-size: 13px; font-family: inherit;
+        }
+        .mt-pl-inline-input:focus { border-color: var(--mt-accent); }
+        .mt-pl-inline-ok, .mt-pl-inline-cancel {
+            height: 32px; margin: 0; padding: 0 10px; box-sizing: border-box; border: none; border-radius: 8px; cursor: pointer; font-size: 12px; font-family: inherit;
+        }
+        .mt-pl-inline-ok { background: var(--mt-accent); color: var(--mt-text-on-accent, #111827); font-weight: 600; }
+        .mt-pl-inline-cancel { background: rgba(255,255,255,0.08); color: var(--mt-text, #fff); }
+        .mt-btn-favorite.mt-is-active { color: var(--mt-accent); }
+
+        /* Окно «Добавить в плейлист» */
+        .mt-pl-modal {
+            position: fixed; inset: 0; z-index: 9999999; display: flex; justify-content: center; align-items: center;
+            background: var(--mt-overlay, rgba(0,0,0,0.6)); backdrop-filter: blur(5px); -webkit-backdrop-filter: blur(5px);
+            font-family: -apple-system, sans-serif; text-shadow: none;
+        }
+        .mt-pl-modal * { text-shadow: none; }
+        .mt-pl-modal-box {
+            width: min(320px, calc(100vw - 32px)); max-height: 80vh; display: flex; flex-direction: column; box-sizing: border-box;
+            background: var(--mt-bg-primary); background: linear-gradient(var(--mt-bg-primary), var(--mt-bg-primary)), var(--mt-bg-solid, #10151c);
+            border: 1px solid var(--mt-border); border-radius: 12px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); color: var(--mt-text, #fff);
+        }
+        .mt-pl-modal-header { display: flex; justify-content: space-between; align-items: center; padding: 14px 15px 6px; }
+        .mt-pl-modal-title { font-weight: bold; }
+        .mt-pl-modal-close { cursor: pointer; color: var(--mt-text-dim, #888); }
+        .mt-pl-modal-track { padding: 0 15px 10px; font-size: 12px; color: var(--mt-text-dim, #888); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; border-bottom: 1px solid var(--mt-border); }
+        .mt-pl-modal-body { flex: 1; overflow-y: auto; padding: 10px 12px; }
+        .mt-pl-option {
+            display: flex; align-items: center; gap: 10px; padding: 9px 10px; margin-bottom: 4px; border-radius: 8px; cursor: pointer;
+            background: rgba(255,255,255,0.05); font-size: 13px; transition: background 0.2s;
+        }
+        .mt-pl-option:hover { background: rgba(255,255,255,0.1); transform: none; }
+        .mt-pl-option-icon { flex-shrink: 0; width: 14px; text-align: center; color: var(--mt-text-dim, #888); }
+        .mt-pl-option.mt-is-added .mt-pl-option-icon { color: var(--mt-accent); }
+        .mt-pl-option.mt-is-busy { opacity: 0.6; }
+        .mt-pl-option-name { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
         .mt-queue-empty { font-size: 12px; color: var(--mt-text-dim, #888); text-align: center; padding: 10px; }
 
         /* Плавающая кнопка. Inline у неё только координаты */
@@ -2746,7 +3161,7 @@ async function initializeExtension() {
                     <div class="mt-panel-header-left">
                         <span class="mt-panel-title">Очередь треков</span>
                         <i class="fa-solid fa-trash moodtube-ctrl mt-btn mt-btn-accent mt-btn-small" id="moodtube-btn-clear-queue" title="Очистить очередь"></i>
-                        <i class="fa-solid fa-list-check moodtube-ctrl mt-btn mt-btn-accent mt-btn-small" id="moodtube-btn-spotify-playlists" style="display:none;" title="Мои плейлисты Spotify"></i>
+                        <i class="fa-solid fa-list-check moodtube-ctrl mt-btn mt-btn-accent mt-btn-small mt-btn-playlists" id="moodtube-btn-spotify-playlists" title="Плейлисты"></i>
                     </div>
                     <i class="fa-solid fa-chevron-down moodtube-ctrl mt-btn mt-panel-close" id="moodtube-btn-close-queue" title="Скрыть"></i>
                 </div>
@@ -2757,7 +3172,10 @@ async function initializeExtension() {
 
             <div id="moodtube-spotify-playlists-container" class="mt-panel mt-panel-playlists" style="display:none;">
                 <div class="mt-panel-header">
-                    <span class="mt-panel-title">Плейлисты Spotify</span>
+                    <div class="mt-panel-header-left">
+                        <i class="fa-solid fa-chevron-left moodtube-ctrl mt-btn mt-btn-small mt-pl-back" id="moodtube-btn-playlists-back" style="display:none;" title="Назад к плейлистам"></i>
+                        <span class="mt-panel-title" id="moodtube-playlists-title">Плейлисты</span>
+                    </div>
                     <i class="fa-solid fa-chevron-down moodtube-ctrl mt-btn mt-panel-close" id="moodtube-btn-close-playlists" title="Скрыть"></i>
                 </div>
                 <div id="moodtube-playlists-list" class="mt-panel-list"></div>
@@ -3045,6 +3463,19 @@ async function initializeExtension() {
                                     </div>
                                     <button id="moodtube-btn-spotify-auth" class="mt-btn-test" style="margin-top: 10px;">Авторизоваться</button>
                                     <div id="moodtube-spotify-status" class="mt-status-text"></div>
+                                    <span class="mt-label" style="margin-top:12px;">Сердечко ❤ сохраняет в</span>
+                                    <select id="moodtube-fav-target" class="mt-input-field">
+                                        <option value="both">Любимые Spotify и Любимые MoodTube</option>
+                                        <option value="spotify">Только любимые Spotify</option>
+                                        <option value="moodtube">Только Любимые MoodTube</option>
+                                    </select>
+                                    <span class="mt-label">Кнопка «+» в очереди показывает</span>
+                                    <select id="moodtube-plus-target" class="mt-input-field">
+                                        <option value="both">Плейлисты Spotify и MoodTube</option>
+                                        <option value="spotify">Только плейлисты Spotify</option>
+                                        <option value="moodtube">Только плейлисты MoodTube</option>
+                                    </select>
+                                    <span class="mt-label" style="font-size:0.76em;">Плейлисты MoodTube хранятся в настройках таверны — общие для всех устройств.</span>
                                 </div>
                                 
                                 <hr class="mt-divider">
@@ -3529,47 +3960,7 @@ async function initializeExtension() {
             playPrevInQueue();
         });
         
-        $('#moodtube-btn-favorite').on('click', async () => {
-            if (currentQueueIndex >= 0 && currentQueueIndex < trackQueue.length) {
-                const track = trackQueue[currentQueueIndex];
-                const trackName = `${track.title} ${track.artist || track.Artist || ''}`.trim();
-                let favList = getMtSetting('favorites');
-                
-                if (!favList.includes(trackName)) {
-                    favList = favList ? favList + ', ' + trackName : trackName;
-                    saveMtSetting('favorites', favList);
-                    $('#moodtube-setting-favorites-list').val(favList);
-                    
-                    $('#moodtube-btn-favorite').removeClass('fa-regular').addClass('fa-solid');
-                    toastr.success(`Трек добавлен в Избранное (ИИ)`);
-                } else {
-                    toastr.info(`Трек уже в Избранном (ИИ)`);
-                }
-                
-                const source = localStorage.getItem('moodtube_playback_source') || 'youtube';
-                if (source === 'spotify' && track.videoId && track.videoId.startsWith('spotify:track:')) {
-                    const spotifyId = track.videoId.split(':')[2];
-                    const token = await refreshSpotifyToken();
-                    if (token) {
-                        try {
-                            const uriParam = encodeURIComponent(`spotify:track:${spotifyId}`);
-                            const res = await fetch(`https://api.spotify.com/v1/me/library?uris=${uriParam}`, {
-                                method: 'PUT',
-                                headers: { Authorization: `Bearer ${token}` }
-                            });
-                            if (res.ok) {
-                                toastr.success("Трек сохранен в любимые Spotify");
-                            } else {
-                                const err = await res.json().catch(()=>({}));
-                                toastr.error("Spotify: " + (err.error?.message || "Ошибка сохранения в любимые"));
-                            }
-                        } catch(e) { console.error(e); }
-                    }
-                }
-            } else {
-                toastr.warning(`Нет активного трека`);
-            }
-        });
+        $('#moodtube-btn-favorite').on('click', () => toggleFavoriteCurrent());
 
         // Функция форматирования времени
         const formatTime = (time) => {
@@ -3652,9 +4043,6 @@ async function initializeExtension() {
             $('#moodtube-inner-content').hide();
             $('#moodtube-btn-close').hide();
             $('#moodtube-queue-container').css('display', 'flex');
-            const source = localStorage.getItem('moodtube_playback_source') || 'youtube';
-            if (source === 'spotify') $('#moodtube-btn-spotify-playlists').show();
-            else $('#moodtube-btn-spotify-playlists').hide();
             updateQueueUI();
         });
 
@@ -3665,8 +4053,9 @@ async function initializeExtension() {
         });
 
         $('#moodtube-btn-spotify-playlists').on('click', () => {
-            showSpotifyPlaylists();
+            showPlaylistsPanel();
         });
+        $('#moodtube-btn-playlists-back').on('click', () => renderPlaylistsList());
 
         $('#moodtube-btn-close-playlists').on('click', () => {
             $('#moodtube-spotify-playlists-container').hide();
@@ -3877,6 +4266,8 @@ async function initializeExtension() {
             toggleCustomThemeBlock();
             $('#moodtube-playback-source').val(localStorage.getItem('moodtube_playback_source') || 'youtube').trigger('change');
             $('#moodtube-spotify-client-id').val(localStorage.getItem('moodtube_spotify_client_id') || '');
+            $('#moodtube-fav-target').val(mtSpotifyTarget('fav'));
+            $('#moodtube-plus-target').val(mtSpotifyTarget('plus'));
             const spotToken = localStorage.getItem('moodtube_spotify_token');
             if (spotToken) {
                 $('#moodtube-spotify-status').html('<span style="color:#1DB954;">Авторизован ✓</span>');
@@ -4027,6 +4418,8 @@ async function initializeExtension() {
             const source = $('#moodtube-playback-source').val();
             localStorage.setItem('moodtube_playback_source', source);
             localStorage.setItem('moodtube_spotify_client_id', $('#moodtube-spotify-client-id').val().trim());
+            localStorage.setItem('moodtube_fav_target', $('#moodtube-fav-target').val());
+            localStorage.setItem('moodtube_plus_target', $('#moodtube-plus-target').val());
             if (source === 'spotify') initSpotifyPlayer();
             
             const fabEnabled = $('#moodtube-setting-fab').is(':checked');
