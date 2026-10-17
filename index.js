@@ -2376,54 +2376,197 @@ async function loadThemeCatalog(url) {
         $out.empty().append('<div class="mt-catalog-status mt-catalog-error">Это не каталог MoodTube (нужен index.json с "type": "moodtube_catalog").</div>');
         return;
     }
-    $out.empty();
-    if (data.name) $('<div class="mt-catalog-title">').text(`${data.name} · ${themes.length}`).appendTo($out);
-    if (!themes.length) { $out.append('<div class="mt-catalog-status">В каталоге пока нет тем.</div>'); return; }
+    renderThemeCatalog($out, data, themes, url);
+}
 
-    themes.forEach(t => {
-        const fileUrl = resolveCatalogUrl(t.file, url);
-        const previewUrl = resolveCatalogUrl(t.preview, url);
-        const $item = $(`
-            <div class="mt-catalog-item">
-                <div class="mt-catalog-preview"><i class="fa-solid fa-palette"></i></div>
-                <div class="mt-catalog-info">
+// Группировка перекрасов: явное поле "group" или общий кусок названия ("… Vinyl", "Clear Case …").
+// Для каждой темы берём префикс/суффикс названия, который встречается у наибольшего числа тем.
+function groupCatalogThemes(themes) {
+    const words = t => String(t.name || t.id || '').trim().split(/\s+/).filter(Boolean);
+    const counts = new Map();
+    const cands = themes.map(t => {
+        if (typeof t.group === 'string' && t.group.trim()) return null;
+        const w = words(t);
+        const list = [];
+        for (let n = 1; n <= w.length; n++) list.push({ key: 'p:' + w.slice(0, n).join(' ').toLowerCase(), side: 'p', n });
+        for (let n = 1; n < w.length; n++) list.push({ key: 's:' + w.slice(w.length - n).join(' ').toLowerCase(), side: 's', n });
+        list.forEach(c => counts.set(c.key, (counts.get(c.key) || 0) + 1));
+        return list;
+    });
+    const picks = themes.map((t, i) => {
+        if (!cands[i]) return { key: 'g:' + t.group.trim().toLowerCase(), explicit: true };
+        let best = null, bestCount = 1;
+        for (const c of cands[i]) {
+            const cnt = counts.get(c.key);
+            if (cnt > bestCount || (cnt === bestCount && best && cnt > 1 && c.key.length > best.key.length)) { best = c; bestCount = cnt; }
+        }
+        return best ? { ...best } : { key: 'single:' + i };
+    });
+    const groups = [];
+    const byKey = new Map();
+    themes.forEach((t, i) => {
+        const pick = picks[i];
+        let g = byKey.get(pick.key);
+        if (!g) { g = { key: pick.key, pick, items: [] }; byKey.set(pick.key, g); groups.push(g); }
+        g.items.push(t);
+    });
+    // Группа из одной темы — обычная карточка
+    return groups.map(g => {
+        if (g.items.length < 2) return { name: String(g.items[0].name || g.items[0].id || 'Без названия'), items: g.items.map(t => ({ theme: t, label: '' })) };
+        let name;
+        if (g.pick.explicit) name = g.items[0].group.trim();
+        else {
+            const w = words(g.items[0]);
+            name = g.pick.side === 'p' ? w.slice(0, g.pick.n).join(' ') : w.slice(w.length - g.pick.n).join(' ');
+        }
+        const items = g.items.map(t => {
+            let label = typeof t.variant === 'string' && t.variant.trim() ? t.variant.trim() : '';
+            if (!label) {
+                const w = words(t);
+                if (!g.pick.explicit) label = (g.pick.side === 'p' ? w.slice(g.pick.n) : w.slice(0, w.length - g.pick.n)).join(' ');
+                else label = String(t.name || t.id || '');
+            }
+            return { theme: t, label: label || 'Оригинал' };
+        });
+        return { name, items };
+    });
+}
+
+async function installCatalogTheme(t, fileUrl, $btn) {
+    const name = String(t.name || t.id || 'тема');
+    const host = (() => { try { return new URL(fileUrl).hostname; } catch (e) { return ''; } })();
+    if (!confirm(`Тема из внешнего источника\n\n«${name}»${t.author ? ` от ${t.author}` : ''}\nИсточник: ${host}\n\nТема содержит только CSS и картинки, но может загружать картинки с внешних сайтов (они увидят ваш IP) и менять или скрывать части интерфейса MoodTube.\n\nПодставить тему в редактор?`)) return;
+    const html = $btn.html();
+    $btn.prop('disabled', true).html('<i class="fa-solid fa-spinner fa-spin"></i>');
+    try {
+        const themeData = JSON.parse(await fetchCatalogText(fileUrl, MT_CATALOG_MAX_THEME));
+        if (!themeData || typeof themeData !== 'object' || Array.isArray(themeData)) throw new Error('неверный формат файла темы');
+        loadThemeDataIntoEditor(themeData, name);
+    } catch (e) {
+        toastr.error(`MoodTube: не удалось установить тему — ${e.message || e}`);
+    } finally {
+        $btn.prop('disabled', false).html(html);
+    }
+}
+
+function mtVariantsWord(n) {
+    const m10 = n % 10, m100 = n % 100;
+    if (m10 === 1 && m100 !== 11) return `${n} вариант`;
+    if (m10 >= 2 && m10 <= 4 && (m100 < 12 || m100 > 14)) return `${n} варианта`;
+    return `${n} вариантов`;
+}
+
+// Галерея каталога: сетка карточек, перекрасы одной темы — одна карточка с выбором варианта
+function renderThemeCatalog($out, data, themes, url) {
+    const groups = groupCatalogThemes(themes);
+    const tagCounts = new Map();
+    themes.forEach(t => (Array.isArray(t.tags) ? t.tags : []).forEach(tag => {
+        tag = String(tag).toLowerCase();
+        tagCounts.set(tag, (tagCounts.get(tag) || 0) + 1);
+    }));
+    const topTags = [...tagCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 10).map(e => e[0]);
+
+    $out.empty();
+    const $head = $('<div class="mt-catalog-head"></div>').appendTo($out);
+    $('<div class="mt-catalog-title">').text(`${data.name || 'Каталог'} · ${themes.length} тем`).appendTo($head);
+    const $filters = $(`
+        <div class="mt-catalog-filters">
+            <input type="text" class="mt-input-field mt-catalog-search" placeholder="Поиск темы…" autocomplete="off" spellcheck="false">
+            <div class="mt-catalog-tagbar"></div>
+        </div>`).appendTo($head);
+    const $tagbar = $filters.find('.mt-catalog-tagbar');
+    if (topTags.length > 1) {
+        ['', ...topTags].forEach(tag => $('<button type="button" class="mt-catalog-filter">').attr('data-tag', tag).text(tag || 'Все').toggleClass('mt-is-active', !tag).appendTo($tagbar));
+    } else $tagbar.remove();
+
+    const $grid = $('<div class="mt-catalog-grid"></div>').appendTo($out);
+    const $empty = $('<div class="mt-catalog-status" style="display:none;">Ничего не найдено</div>').appendTo($out);
+
+    const cards = groups.map(g => {
+        const isGroup = g.items.length > 1;
+        const swatches = isGroup && g.items.every(it => /^#[0-9a-f]{3,8}$/i.test(String(it.theme.swatch || '')));
+        const $card = $(`
+            <div class="mt-catalog-card${isGroup ? ' mt-catalog-group' : ''}">
+                <div class="mt-catalog-preview"><i class="fa-solid fa-palette"></i><img alt="" loading="lazy" referrerpolicy="no-referrer"></div>
+                <div class="mt-catalog-body">
                     <div class="mt-catalog-name"></div>
                     <div class="mt-catalog-meta"></div>
+                    <div class="mt-catalog-variants"></div>
                     <div class="mt-catalog-desc"></div>
-                    <div class="mt-catalog-tags"></div>
+                    <button class="mt-btn-test mt-catalog-install"><i class="fa-solid fa-download"></i> Установить</button>
                 </div>
-                <button class="mt-btn-test mt-catalog-install"><i class="fa-solid fa-download"></i> Установить</button>
             </div>`);
-        $item.find('.mt-catalog-name').text(String(t.name || t.id || 'Без названия'));
-        $item.find('.mt-catalog-meta').text(t.author ? `от ${t.author}` : '');
-        $item.find('.mt-catalog-desc').text(String(t.description || ''));
-        (Array.isArray(t.tags) ? t.tags : []).slice(0, 6).forEach(tag => $('<span class="mt-catalog-tag">').text(String(tag)).appendTo($item.find('.mt-catalog-tags')));
-        if (previewUrl) {
-            const img = new Image();
-            img.alt = '';
-            img.referrerPolicy = 'no-referrer';
-            img.onload = () => $item.find('.mt-catalog-preview').empty().append(img);
-            img.src = previewUrl;
-        }
-        if (!fileUrl) {
-            $item.find('.mt-catalog-install').prop('disabled', true).attr('title', 'Ссылка на файл темы не https или с неразрешённого сайта');
-        }
-        $item.find('.mt-catalog-install').on('click', async function() {
-            const name = String(t.name || t.id || 'тема');
-            const host = (() => { try { return new URL(fileUrl).hostname; } catch (e) { return ''; } })();
-            if (!confirm(`Тема из внешнего источника\n\n«${name}»${t.author ? ` от ${t.author}` : ''}\nИсточник: ${host}\n\nТема содержит только CSS и картинки, но может загружать картинки с внешних сайтов (они увидят ваш IP) и менять или скрывать части интерфейса MoodTube.\n\nПодставить тему в редактор?`)) return;
-            const $btn = $(this).prop('disabled', true).html('<i class="fa-solid fa-spinner fa-spin"></i>');
-            try {
-                const themeData = JSON.parse(await fetchCatalogText(fileUrl, MT_CATALOG_MAX_THEME));
-                if (!themeData || typeof themeData !== 'object' || Array.isArray(themeData)) throw new Error('неверный формат файла темы');
-                loadThemeDataIntoEditor(themeData, name);
-            } catch (e) {
-                toastr.error(`MoodTube: не удалось установить тему — ${e.message || e}`);
-            } finally {
-                $btn.prop('disabled', false).html('<i class="fa-solid fa-download"></i> Установить');
+        const $img = $card.find('img');
+        $img.on('load', () => $card.find('.mt-catalog-preview').addClass('mt-has-img'));
+        $img.on('error', () => $card.find('.mt-catalog-preview').removeClass('mt-has-img'));
+        $card.find('.mt-catalog-name').text(g.name);
+
+        let current = 0;
+        const select = (i) => {
+            current = i;
+            const t = g.items[i].theme;
+            const authors = [...new Set(g.items.map(it => it.theme.author).filter(Boolean))];
+            const meta = [isGroup ? (authors.length === 1 ? `от ${authors[0]}` : '') : (t.author ? `от ${t.author}` : ''), isGroup ? mtVariantsWord(g.items.length) : ''].filter(Boolean).join(' · ');
+            $card.find('.mt-catalog-meta').text(meta);
+            $card.find('.mt-catalog-desc').text(String(t.description || '')).attr('title', String(t.description || ''));
+            const previewUrl = resolveCatalogUrl(t.preview, url);
+            $card.find('.mt-catalog-preview').removeClass('mt-has-img');
+            if (previewUrl) $img.attr('src', previewUrl); else $img.removeAttr('src');
+            const fileUrl = resolveCatalogUrl(t.file, url);
+            $card.find('.mt-catalog-install').prop('disabled', !fileUrl)
+                .attr('title', fileUrl ? `Установить «${t.name || t.id}»` : 'Ссылка на файл темы не https или с неразрешённого сайта');
+            $card.find('.mt-catalog-swatch').each((j, b) => $(b).toggleClass('mt-is-active', j === i));
+        };
+
+        if (isGroup) {
+            const $v = $card.find('.mt-catalog-variants');
+            if (swatches) {
+                g.items.forEach((it, i) => $('<button type="button" class="mt-catalog-swatch">')
+                    .css('background', it.theme.swatch).attr('title', it.label).attr('aria-label', it.label)
+                    .on('click', () => select(i)).appendTo($v));
+            } else {
+                const $sel = $('<select class="mt-input-field mt-catalog-variant"></select>').appendTo($v);
+                g.items.forEach((it, i) => $('<option>').val(i).text(it.label).appendTo($sel));
+                $sel.on('change', () => select(Number($sel.val())));
+            }
+        } else $card.find('.mt-catalog-variants').remove();
+
+        $card.find('.mt-catalog-install').on('click', function() {
+            const t = g.items[current].theme;
+            const fileUrl = resolveCatalogUrl(t.file, url);
+            if (fileUrl) installCatalogTheme(t, fileUrl, $(this));
+        });
+        select(0);
+        $grid.append($card);
+
+        const haystack = g.items.map(it => [g.name, it.label, it.theme.name, it.theme.author, it.theme.description, ...(it.theme.tags || [])].join(' ')).join(' ').toLowerCase();
+        const tags = new Set(g.items.flatMap(it => (it.theme.tags || []).map(x => String(x).toLowerCase())));
+        const itemTexts = g.items.map(it => [it.label, it.theme.name, it.theme.description, ...(it.theme.tags || [])].join(' ').toLowerCase());
+        const selectVariant = (i) => { if (i === current) return; if ($card.find('select').length) $card.find('select').val(String(i)); select(i); };
+        return { $card, haystack, tags, itemTexts, selectVariant, isGroup };
+    });
+
+    let activeTag = '';
+    const applyFilters = () => {
+        const q = String($filters.find('.mt-catalog-search').val() || '').trim().toLowerCase();
+        let shown = 0;
+        cards.forEach(c => {
+            const ok = (!q || c.haystack.includes(q)) && (!activeTag || c.tags.has(activeTag));
+            c.$card.toggle(ok);
+            if (ok) shown++;
+            // Поиск попал в конкретный перекрас — сразу показываем его
+            if (ok && q && c.isGroup) {
+                const i = c.itemTexts.findIndex(t => t.includes(q));
+                if (i >= 0) c.selectVariant(i);
             }
         });
-        $out.append($item);
+        $empty.toggle(shown === 0);
+    };
+    $filters.find('.mt-catalog-search').on('input', applyFilters);
+    $tagbar.on('click', '.mt-catalog-filter', function() {
+        activeTag = $(this).attr('data-tag') || '';
+        $tagbar.children().each((i, b) => $(b).toggleClass('mt-is-active', ($(b).attr('data-tag') || '') === activeTag));
+        applyFilters();
     });
 }
 
@@ -3526,27 +3669,48 @@ async function initializeExtension() {
 .mt-catalog-row { display: flex; gap: 6px; align-items: center; }
 .mt-catalog-row .mt-input-field { flex: 1; min-width: 0; }
 .mt-catalog-row .mt-btn-test { width: auto; margin-top: 0; padding: 8px 12px; white-space: nowrap; flex-shrink: 0; }
-.mt-catalog-list { margin-top: 10px; display: flex; flex-direction: column; gap: 8px; max-height: 420px; overflow-y: auto; }
+.mt-catalog-list { margin-top: 10px; }
+.mt-catalog-head { display: flex; flex-direction: column; gap: 6px; margin-bottom: 8px; }
 .mt-catalog-title { font-size: 0.8em; font-weight: 600; color: var(--mt-text-dim, #9CA3AF); }
 .mt-catalog-status { font-size: 0.82em; color: var(--mt-text-dim, #9CA3AF); padding: 6px 2px; }
 .mt-catalog-error { color: #f87171; }
-.mt-catalog-item {
-    display: grid; grid-template-columns: 72px minmax(0, 1fr); grid-template-areas: "preview info" "preview install"; gap: 6px 10px;
-    padding: 8px; border-radius: 10px; background: var(--mt-bg-input); border: 1px solid var(--mt-border);
+.mt-catalog-filters { display: flex; flex-direction: column; gap: 6px; }
+.mt-catalog-tagbar { display: flex; flex-wrap: wrap; gap: 4px; }
+.mt-catalog-filter {
+    padding: 3px 9px; border-radius: 999px; border: 1px solid var(--mt-border); cursor: pointer;
+    background: transparent; color: var(--mt-text-dim, #9CA3AF); font-size: 0.72em; font-family: inherit;
+}
+.mt-catalog-filter.mt-is-active { background: var(--mt-accent); border-color: var(--mt-accent); color: var(--mt-text-on-accent, #111827); font-weight: 600; }
+/* Сетка: 2 колонки в окне настроек и на телефоне, больше — если окно шире */
+.mt-catalog-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 8px; max-height: 560px; overflow-y: auto; padding-right: 2px; }
+.mt-catalog-card {
+    display: flex; flex-direction: column; min-width: 0; overflow: hidden;
+    border-radius: 10px; background: var(--mt-bg-input); border: 1px solid var(--mt-border);
 }
 .mt-catalog-preview {
-    grid-area: preview; width: 72px; height: 72px; border-radius: 8px; overflow: hidden;
+    position: relative; aspect-ratio: 4 / 3; overflow: hidden;
     display: flex; align-items: center; justify-content: center; background: rgba(0,0,0,0.25); color: var(--mt-text-dim, #9CA3AF);
 }
-.mt-catalog-preview img { width: 100%; height: 100%; object-fit: cover; display: block; }
-.mt-catalog-info { grid-area: info; min-width: 0; }
-.mt-catalog-name { font-weight: 600; font-size: 0.9em; color: var(--mt-text, #E5E7EB); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.mt-catalog-meta { font-size: 0.75em; color: var(--mt-text-dim, #9CA3AF); }
-.mt-catalog-desc { font-size: 0.78em; color: var(--mt-text-soft, var(--mt-text, #D1D5DB)); margin-top: 2px; }
-.mt-catalog-tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
-.mt-catalog-tags:empty { display: none; }
-.mt-catalog-tag { font-size: 0.7em; padding: 1px 6px; border-radius: 6px; background: rgba(255,255,255,0.08); color: var(--mt-text-dim, #9CA3AF); }
-.mt-catalog-install { grid-area: install; justify-self: start; width: auto; margin-top: 0; padding: 6px 12px; }
+.mt-catalog-preview img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; display: block; opacity: 0; transition: opacity .2s; }
+.mt-catalog-preview.mt-has-img img { opacity: 1; }
+.mt-catalog-preview.mt-has-img > i { display: none; }
+.mt-catalog-body { display: flex; flex-direction: column; gap: 4px; padding: 7px 8px 8px; flex: 1; min-width: 0; }
+.mt-catalog-name { font-weight: 600; font-size: 0.86em; color: var(--mt-text, #E5E7EB); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mt-catalog-meta { font-size: 0.72em; color: var(--mt-text-dim, #9CA3AF); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mt-catalog-meta:empty { display: none; }
+.mt-catalog-desc {
+    font-size: 0.74em; color: var(--mt-text-soft, var(--mt-text, #D1D5DB));
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+.mt-catalog-desc:empty { display: none; }
+.mt-catalog-variant { padding: 5px 8px; font-size: 0.78em; }
+.mt-catalog-variants { display: flex; flex-wrap: wrap; gap: 5px; }
+.mt-catalog-swatch {
+    width: 18px; height: 18px; padding: 0; border-radius: 50%; cursor: pointer;
+    border: 2px solid rgba(255,255,255,0.25); box-sizing: border-box;
+}
+.mt-catalog-swatch.mt-is-active { border-color: var(--mt-text, #fff); box-shadow: 0 0 0 2px var(--mt-accent); }
+.mt-catalog-install { margin-top: auto; width: 100%; padding: 6px 8px; }
 .mt-catalog-install:disabled { opacity: 0.5; cursor: not-allowed; }
 .mt-divider { border: 0; border-top: 1px solid var(--mt-divider, rgba(255,255,255,0.05)); margin: 15px 0; }
 #mt-settings-modal code { background: var(--mt-bg-input); color: inherit; padding: 0 4px; border-radius: 4px; border: none; }
