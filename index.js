@@ -2298,7 +2298,135 @@ function exportCustomTheme() {
     toastr.success(`MoodTube: тема «${theme.name}» экспортирована`);
 }
 
-// Принимает как собственный формат MoodTube, так и файл темы SillyTavern (берёт custom_css и цвета)
+// Разбор файла темы: собственный формат MoodTube или тема SillyTavern (берёт custom_css и цвета)
+function parseThemeData(data, fallbackName) {
+    if (data.type === 'moodtube_theme' || data.vars || data.images || data.labels) return normalizeCustomTheme(data);
+    if (typeof data.custom_css === 'string' || data.blur_tint_color || data.quote_text_color) {
+        const vars = {};
+        if (data.quote_text_color) { vars.accent = data.quote_text_color; vars.accent_hover = data.quote_text_color; }
+        if (data.blur_tint_color) vars.bg_primary = data.blur_tint_color;
+        if (data.bot_mes_blur_tint_color) vars.bg_secondary = data.bot_mes_blur_tint_color;
+        if (data.border_color) vars.border = data.border_color;
+        return normalizeCustomTheme({ name: data.name || fallbackName, vars, custom_css: data.custom_css || '' });
+    }
+    return null;
+}
+
+// Подставить тему в редактор и показать превью. «Сохранить» — за пользователем.
+function loadThemeDataIntoEditor(data, fallbackName) {
+    const theme = parseThemeData(data, fallbackName);
+    if (!theme) { toastr.error('MoodTube: в файле нет ни custom_css, ни переменных темы'); return null; }
+    if ($('#moodtube-setting-theme').val() !== 'custom') {
+        $('#moodtube-setting-theme').val('custom').trigger('change');
+    }
+    fillCustomThemeForm(theme);
+    applyCustomThemeCss(theme);
+    applyThemeLabels(theme);
+    toastr.success(`MoodTube: тема «${theme.name}» загружена. Нажмите «Сохранить», чтобы применить навсегда.`);
+    return theme;
+}
+
+// --- КАТАЛОГ ТЕМ (index.json на GitHub / jsDelivr) ---
+const MT_CATALOG_URL_KEY = 'moodtube_theme_catalog_url';
+const MT_CATALOG_MAX_INDEX = 512 * 1024;
+const MT_CATALOG_MAX_THEME = 2 * 1024 * 1024;
+// Только https и только хостинги статики с CORS: так тема не придёт с произвольного сервера
+function isAllowedCatalogUrl(url) {
+    let u;
+    try { u = new URL(url); } catch (e) { return false; }
+    if (u.protocol !== 'https:') return false;
+    const h = u.hostname.toLowerCase();
+    return h === 'raw.githubusercontent.com' || h === 'cdn.jsdelivr.net' || h === 'gist.githubusercontent.com' || h.endsWith('.github.io');
+}
+
+function resolveCatalogUrl(ref, baseUrl) {
+    if (typeof ref !== 'string' || !ref.trim()) return null;
+    try {
+        const url = new URL(ref.trim(), baseUrl).href;
+        return isAllowedCatalogUrl(url) ? url : null;
+    } catch (e) { return null; }
+}
+
+async function fetchCatalogText(url, maxBytes) {
+    if (!isAllowedCatalogUrl(url)) throw new Error('Разрешены только https-ссылки с raw.githubusercontent.com, cdn.jsdelivr.net, gist.githubusercontent.com или *.github.io');
+    const res = await fetchWithTimeout(url, { cache: 'no-cache', credentials: 'omit', referrerPolicy: 'no-referrer' }, 15000);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const len = Number(res.headers.get('content-length') || 0);
+    if (len && len > maxBytes) throw new Error(`файл больше ${Math.round(maxBytes / 1024)} КБ`);
+    const text = await res.text();
+    if (text.length > maxBytes) throw new Error(`файл больше ${Math.round(maxBytes / 1024)} КБ`);
+    return text;
+}
+
+async function loadThemeCatalog(url) {
+    const $out = $('#mt-catalog-list');
+    url = String(url || '').trim();
+    if (!url) return;
+    try { localStorage.setItem(MT_CATALOG_URL_KEY, url); } catch (e) {}
+    $out.show().html('<div class="mt-catalog-status"><i class="fa-solid fa-spinner fa-spin"></i> Загружаю каталог…</div>');
+    let data;
+    try {
+        data = JSON.parse(await fetchCatalogText(url, MT_CATALOG_MAX_INDEX));
+    } catch (e) {
+        $out.empty().append($('<div class="mt-catalog-status mt-catalog-error">').text(`Не удалось загрузить каталог: ${e.message || e}`));
+        return;
+    }
+    const themes = (data && data.type === 'moodtube_catalog' && Array.isArray(data.themes)) ? data.themes.filter(t => t && typeof t === 'object' && t.file) : null;
+    if (!themes) {
+        $out.empty().append('<div class="mt-catalog-status mt-catalog-error">Это не каталог MoodTube (нужен index.json с "type": "moodtube_catalog").</div>');
+        return;
+    }
+    $out.empty();
+    if (data.name) $('<div class="mt-catalog-title">').text(`${data.name} · ${themes.length}`).appendTo($out);
+    if (!themes.length) { $out.append('<div class="mt-catalog-status">В каталоге пока нет тем.</div>'); return; }
+
+    themes.forEach(t => {
+        const fileUrl = resolveCatalogUrl(t.file, url);
+        const previewUrl = resolveCatalogUrl(t.preview, url);
+        const $item = $(`
+            <div class="mt-catalog-item">
+                <div class="mt-catalog-preview"><i class="fa-solid fa-palette"></i></div>
+                <div class="mt-catalog-info">
+                    <div class="mt-catalog-name"></div>
+                    <div class="mt-catalog-meta"></div>
+                    <div class="mt-catalog-desc"></div>
+                    <div class="mt-catalog-tags"></div>
+                </div>
+                <button class="mt-btn-test mt-catalog-install"><i class="fa-solid fa-download"></i> Установить</button>
+            </div>`);
+        $item.find('.mt-catalog-name').text(String(t.name || t.id || 'Без названия'));
+        $item.find('.mt-catalog-meta').text(t.author ? `от ${t.author}` : '');
+        $item.find('.mt-catalog-desc').text(String(t.description || ''));
+        (Array.isArray(t.tags) ? t.tags : []).slice(0, 6).forEach(tag => $('<span class="mt-catalog-tag">').text(String(tag)).appendTo($item.find('.mt-catalog-tags')));
+        if (previewUrl) {
+            const img = new Image();
+            img.alt = '';
+            img.referrerPolicy = 'no-referrer';
+            img.onload = () => $item.find('.mt-catalog-preview').empty().append(img);
+            img.src = previewUrl;
+        }
+        if (!fileUrl) {
+            $item.find('.mt-catalog-install').prop('disabled', true).attr('title', 'Ссылка на файл темы не https или с неразрешённого сайта');
+        }
+        $item.find('.mt-catalog-install').on('click', async function() {
+            const name = String(t.name || t.id || 'тема');
+            const host = (() => { try { return new URL(fileUrl).hostname; } catch (e) { return ''; } })();
+            if (!confirm(`Тема из внешнего источника\n\n«${name}»${t.author ? ` от ${t.author}` : ''}\nИсточник: ${host}\n\nТема содержит только CSS и картинки, но может загружать картинки с внешних сайтов (они увидят ваш IP) и менять или скрывать части интерфейса MoodTube.\n\nПодставить тему в редактор?`)) return;
+            const $btn = $(this).prop('disabled', true).html('<i class="fa-solid fa-spinner fa-spin"></i>');
+            try {
+                const themeData = JSON.parse(await fetchCatalogText(fileUrl, MT_CATALOG_MAX_THEME));
+                if (!themeData || typeof themeData !== 'object' || Array.isArray(themeData)) throw new Error('неверный формат файла темы');
+                loadThemeDataIntoEditor(themeData, name);
+            } catch (e) {
+                toastr.error(`MoodTube: не удалось установить тему — ${e.message || e}`);
+            } finally {
+                $btn.prop('disabled', false).html('<i class="fa-solid fa-download"></i> Установить');
+            }
+        });
+        $out.append($item);
+    });
+}
+
 function importCustomThemeFile(file) {
     if (!file) return;
     const reader = new FileReader();
@@ -2311,26 +2439,7 @@ function importCustomThemeFile(file) {
             return;
         }
 
-        let theme;
-        if (data.type === 'moodtube_theme' || data.vars || data.images || data.labels) {
-            theme = normalizeCustomTheme(data);
-        } else if (typeof data.custom_css === 'string' || data.blur_tint_color || data.quote_text_color) {
-            // Тема SillyTavern
-            const vars = {};
-            if (data.quote_text_color) { vars.accent = data.quote_text_color; vars.accent_hover = data.quote_text_color; }
-            if (data.blur_tint_color) vars.bg_primary = data.blur_tint_color;
-            if (data.bot_mes_blur_tint_color) vars.bg_secondary = data.bot_mes_blur_tint_color;
-            if (data.border_color) vars.border = data.border_color;
-            theme = normalizeCustomTheme({ name: data.name || file.name.replace(/\.json$/i, ''), vars, custom_css: data.custom_css || '' });
-        } else {
-            toastr.error('MoodTube: в файле нет ни custom_css, ни переменных темы');
-            return;
-        }
-
-        fillCustomThemeForm(theme);
-        applyCustomThemeCss(theme);
-        applyThemeLabels(theme);
-        toastr.success(`MoodTube: тема «${theme.name}» загружена. Нажмите «Сохранить», чтобы применить навсегда.`);
+        loadThemeDataIntoEditor(data, file.name.replace(/\.json$/i, ''));
     };
     reader.onerror = () => toastr.error('MoodTube: не удалось прочитать файл');
     reader.readAsText(file);
@@ -2936,7 +3045,7 @@ async function initializeExtension() {
         #moodtube-search-container #moodtube-search-input:focus-visible,
         #moodtube-search-container #moodtube-search-input:active { border: 1px solid var(--mt-accent) !important; outline: none !important; box-shadow: none !important; transform: none !important; scale: none !important; zoom: 1 !important; width: 100% !important; height: 40px !important; margin: 0 !important; padding: 0 12px !important; font-size: 15px !important; animation: none !important; }
         #moodtube-search-container #moodtube-search-input { transform: none !important; scale: none !important; transition: border-color .15s ease !important; }
-        #moodtube-search-container #moodtube-search-go { width: 44px !important; min-width: 0 !important; height: 40px !important; margin: 0 !important; padding: 0 !important; box-sizing: border-box !important; border: none !important; border-radius: 8px !important; background: var(--mt-accent) !important; color: #000 !important; font-size: 15px !important; cursor: pointer; display: flex !important; align-items: center; justify-content: center; }
+        #moodtube-search-container #moodtube-search-go { width: 44px !important; min-width: 0 !important; height: 40px !important; margin: 0 !important; padding: 0 !important; box-sizing: border-box !important; border: none !important; border-radius: 8px !important; background: var(--mt-accent) !important; color: var(--mt-text-on-accent, #000) !important; font-size: 15px !important; cursor: pointer; display: flex !important; align-items: center; justify-content: center; }
         .mt-panel-search .mt-search-hint { margin-top: 8px; font-size: 12px; color: var(--mt-text-dim, #888); }
         .mt-btn-close { right: 15px; }
 
@@ -2949,9 +3058,12 @@ async function initializeExtension() {
             flex-direction: column; padding: 15px; background: var(--mt-bg-primary);
         }
         .mt-panel-playlists { z-index: 5; }
-        .mt-panel-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; flex-shrink: 0; }
-        .mt-panel-header-left { display: flex; align-items: center; gap: 10px; }
-        .mt-panel-title { font-weight: bold; font-size: 14px; color: var(--mt-accent); }
+        .mt-panel-header { display: flex; justify-content: space-between; align-items: center; gap: 8px; min-height: 22px; margin-bottom: 10px; flex-shrink: 0; }
+        /* Справа поверх шапки висят кнопки окна (поиск, настройки) — оставляем под них место, название не переносится */
+        .mt-panel-header-left { display: flex; align-items: center; gap: 10px; flex: 1 1 auto; min-width: 0; margin-right: 60px; }
+        .mt-panel-header-left > i { flex-shrink: 0; }
+        .mt-panel-title { font-weight: bold; font-size: 14px; color: var(--mt-accent); min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .mt-panel-header > .mt-panel-close { flex-shrink: 0; }
         .mt-panel-close { font-size: 14px; }
         .mt-panel-list { flex: 1; overflow-y: auto; padding-right: 5px; }
 
@@ -3411,6 +3523,31 @@ async function initializeExtension() {
 .mt-label-accent { color: var(--mt-accent); }
 .mt-input-field.mt-input-readonly { background: rgba(0,0,0,0.4); color: var(--mt-text-dim, #9CA3AF); }
 .mt-status-text { margin-top: 8px; font-size: 0.85em; color: var(--mt-text-dim, #9CA3AF); }
+.mt-catalog-row { display: flex; gap: 6px; align-items: center; }
+.mt-catalog-row .mt-input-field { flex: 1; min-width: 0; }
+.mt-catalog-row .mt-btn-test { width: auto; margin-top: 0; padding: 8px 12px; white-space: nowrap; flex-shrink: 0; }
+.mt-catalog-list { margin-top: 10px; display: flex; flex-direction: column; gap: 8px; max-height: 420px; overflow-y: auto; }
+.mt-catalog-title { font-size: 0.8em; font-weight: 600; color: var(--mt-text-dim, #9CA3AF); }
+.mt-catalog-status { font-size: 0.82em; color: var(--mt-text-dim, #9CA3AF); padding: 6px 2px; }
+.mt-catalog-error { color: #f87171; }
+.mt-catalog-item {
+    display: grid; grid-template-columns: 72px minmax(0, 1fr); grid-template-areas: "preview info" "preview install"; gap: 6px 10px;
+    padding: 8px; border-radius: 10px; background: var(--mt-bg-input); border: 1px solid var(--mt-border);
+}
+.mt-catalog-preview {
+    grid-area: preview; width: 72px; height: 72px; border-radius: 8px; overflow: hidden;
+    display: flex; align-items: center; justify-content: center; background: rgba(0,0,0,0.25); color: var(--mt-text-dim, #9CA3AF);
+}
+.mt-catalog-preview img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.mt-catalog-info { grid-area: info; min-width: 0; }
+.mt-catalog-name { font-weight: 600; font-size: 0.9em; color: var(--mt-text, #E5E7EB); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mt-catalog-meta { font-size: 0.75em; color: var(--mt-text-dim, #9CA3AF); }
+.mt-catalog-desc { font-size: 0.78em; color: var(--mt-text-soft, var(--mt-text, #D1D5DB)); margin-top: 2px; }
+.mt-catalog-tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+.mt-catalog-tags:empty { display: none; }
+.mt-catalog-tag { font-size: 0.7em; padding: 1px 6px; border-radius: 6px; background: rgba(255,255,255,0.08); color: var(--mt-text-dim, #9CA3AF); }
+.mt-catalog-install { grid-area: install; justify-self: start; width: auto; margin-top: 0; padding: 6px 12px; }
+.mt-catalog-install:disabled { opacity: 0.5; cursor: not-allowed; }
 .mt-divider { border: 0; border-top: 1px solid var(--mt-divider, rgba(255,255,255,0.05)); margin: 15px 0; }
 #mt-settings-modal code { background: var(--mt-bg-input); color: inherit; padding: 0 4px; border-radius: 4px; border: none; }
 @media (max-width: 600px) {
@@ -3451,6 +3588,16 @@ async function initializeExtension() {
                                 </select>
                                 <div id="mt-custom-theme-block" class="mt-subpanel mt-theme-editor" style="display:none;">
                                     <span class="mt-label mt-label-accent" style="margin-top:0;"><i class="fa-solid fa-palette"></i> Кастомная тема</span>
+                                    <div class="mt-catalog">
+                                        <span class="mt-label">Каталог тем (ссылка на index.json)</span>
+                                        <div class="mt-catalog-row">
+                                            <input type="text" id="mt-catalog-url" class="mt-input-field" placeholder="https://raw.githubusercontent.com/<user>/<repo>/main/index.json" autocomplete="off" spellcheck="false">
+                                            <button id="mt-catalog-load" class="mt-btn-test"><i class="fa-solid fa-cloud-arrow-down"></i> Загрузить</button>
+                                        </div>
+                                        <span class="mt-label" style="margin-top:4px; font-size:0.74em;">Ссылки https с raw.githubusercontent.com, cdn.jsdelivr.net или *.github.io. Тема подставится в редактор, применится она после «Сохранить».</span>
+                                        <div id="mt-catalog-list" class="mt-catalog-list" style="display:none;"></div>
+                                    </div>
+                                    <hr class="mt-divider">
                                     <span class="mt-label">Название темы</span>
                                     <input type="text" id="mt-custom-theme-name" class="mt-input-field" placeholder="My MoodTube Theme">
                                     <span class="mt-label">Цвета (HEX или rgba)</span>
@@ -4331,6 +4478,7 @@ async function initializeExtension() {
             $('#moodtube-setting-theme').val(localStorage.getItem('moodtube_theme') || 'blue');
             fillCustomThemeForm(loadCustomTheme());
             toggleCustomThemeBlock();
+            try { if (!$('#mt-catalog-url').val()) $('#mt-catalog-url').val(localStorage.getItem(MT_CATALOG_URL_KEY) || ''); } catch (e) {}
             $('#moodtube-playback-source').val(localStorage.getItem('moodtube_playback_source') || 'youtube').trigger('change');
             $('#moodtube-spotify-client-id').val(localStorage.getItem('moodtube_spotify_client_id') || '');
             $('#moodtube-fav-target').val(mtSpotifyTarget('fav'));
@@ -4466,6 +4614,8 @@ async function initializeExtension() {
             importCustomThemeFile(this.files && this.files[0]);
         });
         $('#mt-custom-theme-export').on('click', exportCustomTheme);
+        $('#mt-catalog-load').on('click', () => loadThemeCatalog($('#mt-catalog-url').val()));
+        $('#mt-catalog-url').on('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); loadThemeCatalog($('#mt-catalog-url').val()); } });
         $('#mt-custom-theme-reset').on('click', () => {
             if (!confirm('Сбросить кастомную тему к значениям по умолчанию?')) return;
             fillCustomThemeForm(getDefaultCustomTheme());

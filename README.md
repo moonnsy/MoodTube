@@ -95,6 +95,37 @@
 }
 ```
 
+
+**Каталог тем.** В редакторе Custom есть поле «Каталог тем». Туда вставляется ссылка на `index.json`, и MoodTube показывает галерею: превью, название, автор, описание. Кнопка «Установить» подставляет тему в редактор, применится она после «Сохранить». Последний адрес каталога запоминается.
+
+```json
+{
+    "type": "moodtube_catalog",
+    "version": 1,
+    "name": "Название каталога",
+    "themes": [
+        {
+            "id": "rose-vinyl",
+            "name": "Rose Vinyl",
+            "author": "ник",
+            "description": "Пиксельный розовый плеер с пластинкой",
+            "file": "themes/vinyl/rose-vinyl.json",
+            "preview": "previews/rose-vinyl.png",
+            "tags": ["light", "pixel"],
+            "version": 1
+        }
+    ]
+}
+```
+`file` и `preview` можно указывать относительными (от адреса `index.json`) или полными ссылками. Файл темы — обычный `moodtube_theme` v2. Ссылки на каталог:
+`https://raw.githubusercontent.com/<user>/<repo>/<branch>/index.json` или `https://cdn.jsdelivr.net/gh/<user>/<repo>@<branch>/index.json`.
+
+Ограничения безопасности:
+* принимаются только https-ссылки с `raw.githubusercontent.com`, `cdn.jsdelivr.net`, `gist.githubusercontent.com` и `*.github.io`, и для каталога, и для файлов тем и превью;
+* `index.json` не больше 512 КБ, файл темы не больше 2 МБ;
+* перед установкой показывается предупреждение «Тема из внешнего источника»;
+* тема проходит тот же разбор, что и импорт файла (`normalizeCustomTheme`, `cssUrlValue`), ничего не выполняется.
+
 **Как подключается CSS.** Свой CSS идёт отдельным `<style>` без добавок спереди, поэтому `@import` работает. Базовые стили плеера заданы на классах с низкой специфичностью, так что `!important` для них не нужен.
 
 **Структура плеера**
