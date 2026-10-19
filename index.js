@@ -2056,6 +2056,130 @@ function saveMtSetting(key, val) {
     }
 }
 
+// ============================================================
+//  АЛЬТЕРНАТИВНЫЙ ВИД: полоса под шапкой таверны
+//  Встаёт первым элементом в #sheld (флекс-колонка), поэтому чат сдвигается вниз, а не перекрывается.
+//  Кнопки полосы нажимают кнопки основного плеера — логика одна.
+// ============================================================
+const MT_LAYOUT_KEY = 'moodtube_player_layout';
+let mtDockTimer = null;
+let mtDockObserved = false;
+
+function getPlayerLayout() {
+    try { return localStorage.getItem(MT_LAYOUT_KEY) === 'dock' ? 'dock' : 'floating'; } catch (e) { return 'floating'; }
+}
+
+function ensureDockBar() {
+    let $bar = $('#moodtube-dock');
+    if ($bar.length) return $bar;
+    $bar = $(`
+        <div id="moodtube-dock" class="mt-dock mt-is-idle" data-mt-state="idle">
+            <div class="mt-slot mt-dock-slot-bg" aria-hidden="true"></div>
+            <div class="mt-dock-inner">
+                <div class="mt-dock-cover"><img class="mt-dock-cover-img" alt=""></div>
+                <div class="mt-dock-info">
+                    <span class="mt-dock-title">No Track Selected</span>
+                    <span class="mt-dock-subtitle"></span>
+                </div>
+                <div class="mt-dock-controls">
+                    <i class="fa-regular fa-heart mt-dock-btn mt-dock-fav" data-mt-proxy="#moodtube-btn-favorite" title="В любимые"></i>
+                    <i class="fa-solid fa-backward-step mt-dock-btn mt-dock-prev" data-mt-proxy="#moodtube-btn-prev" title="Предыдущий"></i>
+                    <i class="fa-solid fa-play mt-dock-btn mt-dock-play" data-mt-proxy="#moodtube-btn-playpause" title="Play / Pause"></i>
+                    <i class="fa-solid fa-forward-step mt-dock-btn mt-dock-next" data-mt-proxy="#moodtube-btn-next" title="Следующий"></i>
+                    <span class="mt-dock-btn mt-dock-ai" data-mt-proxy="#moodtube-btn-ai" title="Auto-DJ (AI)"><i class="fa-solid fa-wand-magic-sparkles mt-btn-icon"></i></span>
+                    <i class="fa-solid fa-up-right-and-down-left-from-center mt-dock-btn mt-dock-expand" title="Открыть плеер: очередь, плейлисты, поиск, настройки"></i>
+                </div>
+            </div>
+            <div class="mt-dock-progress" title="Перемотка"><div class="mt-dock-progress-fill"></div></div>
+        </div>`);
+    $bar.on('click', '[data-mt-proxy]', function(e) {
+        e.stopPropagation();
+        $($(this).attr('data-mt-proxy')).trigger('click');
+    });
+    $bar.on('click', '.mt-dock-expand', function(e) {
+        e.stopPropagation();
+        isPlayerFolded = !isPlayerFolded;
+        updatePlayerVisibility();
+        $(this).toggleClass('mt-is-open', !isPlayerFolded);
+    });
+    // Перемотка: передаём долю основному слайдеру — у него уже есть обработчик seek
+    $bar.on('click', '.mt-dock-progress', function(e) {
+        const rect = this.getBoundingClientRect();
+        const ratio = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
+        $('#moodtube-progress-slider').val(Math.round(ratio * 100)).trigger('input').trigger('change');
+        syncDockProgress();
+    });
+    return $bar;
+}
+
+function mountDockBar() {
+    const $sheld = $('#sheld');
+    if (!$sheld.length) return false;
+    const $bar = ensureDockBar();
+    // Прямо перед #chat: так полоса оказывается под любыми шапками (таверны и других расширений)
+    const $chat = $sheld.children('#chat');
+    if ($chat.length) { if (!$bar.next().is($chat)) $bar.insertBefore($chat); }
+    else if (!$bar.parent().is($sheld)) $bar.prependTo($sheld);
+    return true;
+}
+
+function syncDockProgress() {
+    const v = Number($('#moodtube-progress-slider').val()) || 0;
+    $('#moodtube-dock .mt-dock-progress-fill').css('width', `${Math.min(100, Math.max(0, v))}%`);
+}
+
+function syncDock() {
+    const $d = $('#moodtube-dock');
+    if (!$d.length) return;
+    const $p = $('#moodtube-mini-player');
+    $d.find('.mt-dock-title').text($('#moodtube-widget-title').text());
+    $d.find('.mt-dock-subtitle').text($('#moodtube-label-subtitle').text());
+    const src = $('#moodtube-widget-cover').attr('src') || '';
+    const $img = $d.find('.mt-dock-cover-img');
+    if ($img.attr('src') !== src) $img.attr('src', src);
+    const playing = $('#moodtube-btn-playpause').hasClass('fa-pause');
+    $d.find('.mt-dock-play').toggleClass('fa-pause', playing).toggleClass('fa-play', !playing);
+    const fav = $('#moodtube-btn-favorite').hasClass('fa-solid');
+    $d.find('.mt-dock-fav').toggleClass('fa-solid', fav).toggleClass('fa-regular', !fav).toggleClass('mt-is-active', fav);
+    const busy = $('#moodtube-btn-ai').hasClass('mt-is-busy');
+    $d.find('.mt-dock-ai').toggleClass('mt-is-busy', busy).find('.mt-btn-icon').toggleClass('fa-spin', busy);
+    const state = $p.attr('data-mt-state') || 'idle';
+    $d.attr('data-mt-state', state)
+        .toggleClass('mt-is-playing', state === 'playing')
+        .toggleClass('mt-is-paused', state === 'paused')
+        .toggleClass('mt-is-idle', state === 'idle')
+        .toggleClass('mt-dj-busy', busy)
+        .attr('data-mt-theme', $p.attr('data-mt-theme') || '');
+    $d.find('.mt-dock-expand').toggleClass('mt-is-open', $p.is(':visible'));
+    syncDockProgress();
+}
+
+function observeForDock() {
+    if (mtDockObserved) return;
+    const els = ['moodtube-widget-title', 'moodtube-label-subtitle', 'moodtube-widget-cover', 'moodtube-btn-playpause', 'moodtube-btn-favorite', 'moodtube-btn-ai', 'moodtube-mini-player']
+        .map(id => document.getElementById(id)).filter(Boolean);
+    if (!els.length) return;
+    mtDockObserved = true;
+    const obs = new MutationObserver(() => { if (getPlayerLayout() === 'dock') syncDock(); });
+    els.forEach(el => obs.observe(el, el.id === 'moodtube-mini-player'
+        ? { attributes: true, attributeFilter: ['data-mt-state', 'data-mt-theme', 'style'] }
+        : { attributes: true, attributeFilter: ['class', 'src'], childList: true, characterData: true, subtree: true }));
+}
+
+function applyPlayerLayout() {
+    const dock = getPlayerLayout() === 'dock';
+    $('body').toggleClass('mt-layout-dock', dock);
+    if (dock) {
+        if (!mountDockBar()) return;
+        observeForDock();
+        syncDock();
+        if (!mtDockTimer) mtDockTimer = setInterval(() => { if ($('#moodtube-dock').length) syncDockProgress(); }, 500);
+    } else {
+        $('#moodtube-dock').remove();
+        if (mtDockTimer) { clearInterval(mtDockTimer); mtDockTimer = null; }
+    }
+}
+
 function applyTheme(theme) {
     document.documentElement.setAttribute('data-mt-theme', theme || 'blue');
     $('#mt-settings-modal').attr('data-mt-theme', theme || 'blue');
@@ -2086,6 +2210,7 @@ const MT_THEME_IMAGES = [
     { key: 'cover_bg', css: '--mt-img-cover-bg', label: 'Под обложкой',   hint: '.mt-slot-cover-bg — сцена только в круге обложки (видна, пока нет трека или если обложка прозрачная)' },
     { key: 'cover', css: '--mt-img-cover', label: 'Поверх обложки',       hint: '.mt-slot-cover — винил/рамка поверх обложки' },
     { key: 'decor', css: '--mt-img-decor', label: 'Декор поверх плеера',  hint: '.mt-slot-decor — бантики, стикеры (клики проходят насквозь)' },
+    { key: 'dock',  css: '--mt-img-dock',  label: 'Фон полосы под шапкой', hint: '.mt-dock-slot-bg — фон вида «Полоса под шапкой таверны»' },
 ];
 const MT_THEME_LABELS = [
     { key: 'header',         label: 'Заголовок плеера',     def: '',            target: '#moodtube-label-header',   hint: 'пусто — скрыт' },
@@ -3401,6 +3526,46 @@ async function initializeExtension() {
         #moodtube-mini-player input[type="range"].moodtube-slider:hover::-webkit-slider-thumb { background: var(--mt-slider-thumb-bg-hover, var(--mt-accent-hover)) !important; }
         #moodtube-mini-player input[type="range"].moodtube-slider:hover::-moz-range-thumb { background: var(--mt-slider-thumb-bg-hover, var(--mt-accent-hover)) !important; }
 
+        /* ===== Вид «Полоса под шапкой таверны» (#moodtube-dock внутри #sheld) ===== */
+        .mt-dock {
+            position: relative; z-index: 31; flex-shrink: 0; box-sizing: border-box; overflow: hidden;
+            color: var(--mt-text, #fff); font-family: -apple-system, sans-serif; user-select: none;
+            background: var(--mt-dock-bg, var(--mt-bg-primary)); border-bottom: 1px solid var(--mt-border);
+            backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
+        }
+        .mt-dock, .mt-dock * { text-shadow: none; }
+        .mt-dock-slot-bg { z-index: 0; background-image: var(--mt-img-dock, none); }
+        .mt-dock-inner {
+            position: relative; z-index: 1; display: flex; align-items: center; gap: 10px; box-sizing: border-box;
+            min-height: var(--mt-dock-height, 48px); padding: 6px 12px 8px;
+        }
+        .mt-dock-cover {
+            width: var(--mt-dock-cover-size, 36px); height: var(--mt-dock-cover-size, 36px); flex-shrink: 0; overflow: hidden;
+            border-radius: var(--mt-dock-cover-radius, 50%); border: 2px solid var(--mt-accent); background: #050505; box-sizing: border-box;
+        }
+        .mt-dock-cover-img { width: 100%; height: 100%; object-fit: cover; display: block; }
+        .mt-dock-info { flex: 1; min-width: 0; display: flex; flex-direction: column; line-height: 1.25; }
+        .mt-dock-title { font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .mt-dock-subtitle { font-size: 11px; font-weight: bold; color: var(--mt-accent); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .mt-dock-subtitle:empty { display: none; }
+        .mt-dock-controls { display: flex; align-items: center; gap: 14px; flex-shrink: 0; }
+        .mt-dock-btn { cursor: pointer; color: var(--mt-text, #fff); font-size: 16px; transition: color 0.2s, transform 0.2s; }
+        .mt-dock-btn:hover { color: var(--mt-accent); transform: scale(1.1); }
+        .mt-dock-play { font-size: 20px; width: 20px; text-align: center; }
+        .mt-dock-fav, .mt-dock-ai { color: var(--mt-accent); }
+        .mt-dock-ai { display: inline-flex; align-items: center; justify-content: center; }
+        .mt-dock-ai.mt-is-busy { color: #00ff00; }
+        .mt-dock-expand { font-size: 13px; color: var(--mt-text-dim, #888); }
+        .mt-dock-expand.mt-is-open { color: var(--mt-accent); }
+        .mt-dock-progress { position: absolute; left: 0; right: 0; bottom: 0; z-index: 2; height: 3px; cursor: pointer; background: var(--mt-dock-track, rgba(255,255,255,0.08)); }
+        .mt-dock-progress::before { content: ''; position: absolute; left: 0; right: 0; bottom: 0; height: 12px; }
+        .mt-dock-progress-fill { height: 100%; width: 0; background: var(--mt-dock-progress, var(--mt-accent)); transition: width 0.5s linear; }
+        .mt-dock.mt-is-idle .mt-dock-progress-fill { width: 0 !important; }
+        @media (max-width: 340px) {
+            .mt-dock-controls { gap: 11px; }
+            .mt-dock-fav { display: none; }
+        }
+
         /* Responsive Row Layout */
         .mt-player.moodtube-row-layout .mt-player-body { flex-direction: row; justify-content: flex-start; gap: 12px; }
         .mt-player.moodtube-row-layout .mt-cover { width: 50px; height: 50px; border-width: 2px; }
@@ -3808,6 +3973,13 @@ async function initializeExtension() {
                                     <input type="file" id="mt-custom-theme-file" accept=".json,application/json" style="display:none;">
                                     <span class="mt-label" style="margin-top:6px; font-size:0.74em;">Импорт принимает JSON MoodTube и JSON-темы SillyTavern (берётся custom_css и основные цвета).</span>
                                 </div>
+                                <hr class="mt-divider">
+                                <span class="mt-label" style="margin-top:0;">Вид плеера</span>
+                                <select id="moodtube-setting-layout" class="mt-input-field">
+                                    <option value="floating">Плавающее окно (по умолчанию)</option>
+                                    <option value="dock">Полоса под шапкой таверны</option>
+                                </select>
+                                <span class="mt-label" style="margin-top:4px; font-size:0.76em;">В виде полосы очередь, плейлисты и поиск открываются кнопкой <i class="fa-solid fa-up-right-and-down-left-from-center"></i> справа.</span>
                                 <hr class="mt-divider">
                                 <label class="mt-checkbox-row">
                                     <input type="checkbox" id="moodtube-setting-fab">
@@ -4657,6 +4829,7 @@ async function initializeExtension() {
             }
             $('#moodtube-bulk-count').val(localStorage.getItem('moodtube_ai_bulk_count') || '10');
             $('#moodtube-setting-fab').prop('checked', localStorage.getItem('moodtube_fab_enable') !== 'false');
+            $('#moodtube-setting-layout').val(getPlayerLayout());
             
             let bs = localStorage.getItem('moodtube_global_banned_songs');
             if (bs === null) bs = getMtSetting('banned_songs') || '';
@@ -4805,6 +4978,12 @@ async function initializeExtension() {
             
             const fabEnabled = $('#moodtube-setting-fab').is(':checked');
             localStorage.setItem('moodtube_fab_enable', fabEnabled ? 'true' : 'false');
+            const layout = $('#moodtube-setting-layout').val() === 'dock' ? 'dock' : 'floating';
+            const layoutChanged = layout !== getPlayerLayout();
+            localStorage.setItem(MT_LAYOUT_KEY, layout);
+            applyPlayerLayout();
+            // Переключились на полосу — плавающее окно прячем, оно открывается кнопкой на полосе
+            if (layoutChanged && layout === 'dock') { isPlayerFolded = true; updatePlayerVisibility(); syncDock(); }
             if (fabEnabled) $('#moodtube-fab').show(); else $('#moodtube-fab').hide();
             
             localStorage.setItem('moodtube_ai_bulk_count', $('#moodtube-bulk-count').val());
@@ -4843,6 +5022,7 @@ async function initializeExtension() {
         if (typeof eventSource !== 'undefined' && typeof event_types !== 'undefined') {
             eventSource.on(event_types.CHAT_CHANGED, () => {
                 setTimeout(() => {
+                    if (getPlayerLayout() === 'dock') applyPlayerLayout();
                     restoreQueueCache();
                     if ($('#mt-settings-modal').is(':visible')) {
                         $('#moodtube-btn-settings').trigger('click');
@@ -4922,6 +5102,7 @@ async function initializeExtension() {
     }
     applyTheme(localStorage.getItem('moodtube_theme') || 'blue');
     updatePlayerVisibility();
+    applyPlayerLayout();
     restoreQueueCache();
     startBackgroundPrefetch();
 }
