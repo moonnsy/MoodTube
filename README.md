@@ -178,16 +178,20 @@
 В окне настроек: `.mt-subpanel` (подпанели), `.mt-theme-editor` (редактор темы), `.mt-spotify-settings`, `.mt-divider`, `.mt-label-strong`, `.mt-label-accent`, `.mt-status-text`. Плашки `code` берут фон `--mt-bg-input`. Рамка окна `.mt-flex-container` стилизуется через `#mt-settings-modal .mt-flex-container`: так тема таверны её не перебивает, а в своей теме пишите селектор с той же специфичностью.
 
 
-**Вид «Полоса под шапкой таверны»** («Интерфейс → Вид плеера»). Это узкая полоса прямо над чатом: она стоит в `#sheld` перед `#chat`, поэтому чат сдвигается вниз, а не перекрывается. Кнопка ☰ открывает плеер сразу на очереди, кнопка справа — полный плеер с плейлистами, поиском и настройками.
+**Формат плеера** («Интерфейс → Вид плеера»): плавающая плашка (по умолчанию) или шапка сверху.
+
+В формате **«Шапка сверху»** полоса стоит в `#sheld` прямо перед `#chat`, поэтому чат сдвигается вниз, а не перекрывается. Кнопка <i>⌄</i> раскрывает под полосой полный плеер: обложку, ход трека, громкость, очередь, плейлисты, поиск и настройки. Плавающее окно в этом формате не появляется: сам плеер `#moodtube-mini-player` переезжает в панель `.mt-dock-panel` и получает класс `.mt-player-docked`. Крестик прячет полосу. Вернуть её можно долгим нажатием на плавающую кнопку или через «MoodTube» в меню расширений. Обычный тап по плавающей кнопке, как и раньше, ставит паузу или запускает трек.
 ```
-.mt-dock#moodtube-dock                 те же классы состояния: .mt-is-playing / .mt-is-paused / .mt-is-idle, [data-mt-state], .mt-dj-busy
+.mt-dock#moodtube-dock                 .mt-dock-expanded, .mt-dock-hidden; состояние: .mt-is-playing / .mt-is-paused / .mt-is-idle, [data-mt-state], .mt-dj-busy
 ├─ .mt-slot.mt-dock-slot-bg            картинка --mt-img-dock
-├─ .mt-dock-inner
-│  ├─ .mt-dock-cover > .mt-dock-cover-img
-│  ├─ .mt-dock-info > .mt-dock-title, .mt-dock-subtitle   (подпись берётся из «Подпись под треком»)
-│  └─ .mt-dock-controls > .mt-dock-fav(.mt-is-active), .mt-dock-prev, .mt-dock-play, .mt-dock-next, .mt-dock-ai(.mt-is-busy), .mt-dock-queue(.mt-is-open), .mt-dock-expand(.mt-is-open)
-└─ .mt-dock-progress > .mt-dock-progress-fill   (клик — перемотка)
+├─ .mt-dock-bar
+│  ├─ .mt-dock-inner
+│  │  ├─ .mt-dock-cover > .mt-dock-cover-img
+│  │  ├─ .mt-dock-info > .mt-dock-title, .mt-dock-subtitle   (подпись берётся из «Подпись под треком»)
+│  │  └─ .mt-dock-controls > .mt-dock-fav(.mt-is-active), .mt-dock-prev, .mt-dock-play, .mt-dock-next, .mt-dock-ai(.mt-is-busy), .mt-dock-queue(.mt-is-open), .mt-dock-expand(.mt-is-open), .mt-dock-close
+│  └─ .mt-dock-progress > .mt-dock-progress-fill   (клик — перемотка)
+└─ .mt-dock-panel > .mt-player.mt-player-docked    (обычный плеер со всеми классами выше)
 ```
-Переменные: `--mt-dock-height` (48px), `--mt-dock-bg`, `--mt-dock-cover-size` (36px), `--mt-dock-cover-radius` (50%), `--mt-dock-track`, `--mt-dock-progress`. Когда включён этот вид, у `body` есть класс `.mt-layout-dock`.
+Переменные: `--mt-dock-height` (48px), `--mt-dock-bg`, `--mt-dock-cover-size` (36px), `--mt-dock-cover-radius` (50%), `--mt-dock-track`, `--mt-dock-progress`, `--mt-dock-panel-height` (min(340px, 50vh)), `--mt-dock-panel-max-width` (520px). Когда включён этот вид, у `body` есть класс `.mt-layout-dock`.
 **Слайдеры** защищены от глобальных стилей таверны. Их вид меняется переменными, `!important` не нужен:
 `--mt-slider-track`, `--mt-slider-track-height`, `--mt-slider-track-radius`, `--mt-slider-progress` (Firefox), `--mt-slider-thumb-size`, `--mt-slider-thumb-bg`, `--mt-slider-thumb-bg-hover`, `--mt-slider-thumb-border`, `--mt-slider-thumb-radius`, `--mt-slider-thumb-shadow`.

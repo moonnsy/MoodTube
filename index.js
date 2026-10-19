@@ -2075,6 +2075,7 @@ function ensureDockBar() {
     $bar = $(`
         <div id="moodtube-dock" class="mt-dock mt-is-idle" data-mt-state="idle">
             <div class="mt-slot mt-dock-slot-bg" aria-hidden="true"></div>
+            <div class="mt-dock-bar">
             <div class="mt-dock-inner">
                 <div class="mt-dock-cover"><img class="mt-dock-cover-img" alt=""></div>
                 <div class="mt-dock-info">
@@ -2088,10 +2089,13 @@ function ensureDockBar() {
                     <i class="fa-solid fa-forward-step mt-dock-btn mt-dock-next" data-mt-proxy="#moodtube-btn-next" title="Следующий"></i>
                     <span class="mt-dock-btn mt-dock-ai" data-mt-proxy="#moodtube-btn-ai" title="Auto-DJ (AI)"><i class="fa-solid fa-wand-magic-sparkles mt-btn-icon"></i></span>
                     <i class="fa-solid fa-list-ul mt-dock-btn mt-dock-queue" title="Очередь треков"></i>
-                    <i class="fa-solid fa-up-right-and-down-left-from-center mt-dock-btn mt-dock-expand" title="Открыть плеер: очередь, плейлисты, поиск, настройки"></i>
+                    <i class="fa-solid fa-chevron-down mt-dock-btn mt-dock-expand" title="Раскрыть плеер: очередь, плейлисты, поиск, громкость"></i>
+                    <i class="fa-solid fa-xmark mt-dock-btn mt-dock-close" title="Скрыть полосу (вернуть — долгое нажатие на плавающую кнопку)"></i>
                 </div>
             </div>
             <div class="mt-dock-progress" title="Перемотка"><div class="mt-dock-progress-fill"></div></div>
+            </div>
+            <div class="mt-dock-panel"></div>
         </div>`);
     $bar.on('click', '[data-mt-proxy]', function(e) {
         e.stopPropagation();
@@ -2101,7 +2105,13 @@ function ensureDockBar() {
         e.stopPropagation();
         isPlayerFolded = !isPlayerFolded;
         updatePlayerVisibility();
-        $(this).toggleClass('mt-is-open', !isPlayerFolded);
+        syncDock();
+    });
+    $bar.on('click', '.mt-dock-close', function(e) {
+        e.stopPropagation();
+        setDockHidden(true);
+        const fabOn = localStorage.getItem('moodtube_fab_enable') !== 'false';
+        toastr.info(fabOn ? 'Полоса скрыта. Долгое нажатие на плавающую кнопку вернёт её.' : 'Полоса скрыта. Вернуть: меню расширений → MoodTube.', 'MoodTube', { preventDuplicates: true });
     });
     // Очередь: открываем плеер сразу на ней; повторное нажатие прячет плеер
     $bar.on('click', '.mt-dock-queue', function(e) {
@@ -2127,6 +2137,43 @@ function ensureDockBar() {
         syncDockProgress();
     });
     return $bar;
+}
+
+const MT_DOCK_HIDDEN_KEY = 'moodtube_dock_hidden';
+function isDockHidden() {
+    try { return localStorage.getItem(MT_DOCK_HIDDEN_KEY) === 'true'; } catch (e) { return false; }
+}
+function setDockHidden(hidden) {
+    try { localStorage.setItem(MT_DOCK_HIDDEN_KEY, hidden ? 'true' : 'false'); } catch (e) {}
+    if (hidden) { isPlayerFolded = true; updatePlayerVisibility(); }
+    $('#moodtube-dock').toggleClass('mt-dock-hidden', !!hidden);
+    if (!hidden) syncDock();
+}
+
+// Плеер целиком переезжает в панель под полосой (и обратно в body для плавающего вида).
+// Всё работает по id, поэтому очередь, плейлисты, поиск, громкость и перемотка остаются те же.
+function dockPlayer(docked) {
+    const $p = $('#moodtube-mini-player');
+    if (!$p.length) return;
+    if (docked) {
+        const $panel = $('#moodtube-dock .mt-dock-panel');
+        if ($panel.length && !$p.parent().is($panel)) $p.appendTo($panel);
+        $p.addClass('mt-player-docked');
+    } else {
+        if (!$p.parent().is('body')) $p.appendTo('body');
+        $p.removeClass('mt-player-docked');
+    }
+}
+
+// Долгое нажатие на плавающую кнопку и пункт меню расширений
+function togglePlayerUI() {
+    if (getPlayerLayout() === 'dock') {
+        applyPlayerLayout();
+        setDockHidden(!isDockHidden());
+        return;
+    }
+    isPlayerFolded = !isPlayerFolded;
+    updatePlayerVisibility();
 }
 
 function mountDockBar() {
@@ -2167,7 +2214,11 @@ function syncDock() {
         .toggleClass('mt-is-idle', state === 'idle')
         .toggleClass('mt-dj-busy', busy)
         .attr('data-mt-theme', $p.attr('data-mt-theme') || '');
-    $d.find('.mt-dock-expand').toggleClass('mt-is-open', $p.is(':visible'));
+    const open = $p.is(':visible');
+    $d.find('.mt-dock-expand').toggleClass('mt-is-open', open)
+        .toggleClass('fa-chevron-down', !open).toggleClass('fa-chevron-up', open)
+        .attr('title', open ? 'Свернуть плеер' : 'Раскрыть плеер: очередь, плейлисты, поиск, громкость');
+    $d.toggleClass('mt-dock-expanded', open).toggleClass('mt-dock-hidden', isDockHidden());
     $d.find('.mt-dock-queue').toggleClass('mt-is-open', $p.is(':visible') && $('#moodtube-queue-container').is(':visible'));
     syncDockProgress();
 }
@@ -2189,10 +2240,12 @@ function applyPlayerLayout() {
     $('body').toggleClass('mt-layout-dock', dock);
     if (dock) {
         if (!mountDockBar()) return;
+        dockPlayer(true);
         observeForDock();
         syncDock();
         if (!mtDockTimer) mtDockTimer = setInterval(() => { if ($('#moodtube-dock').length) syncDockProgress(); }, 500);
     } else {
+        dockPlayer(false);
         $('#moodtube-dock').remove();
         if (mtDockTimer) { clearInterval(mtDockTimer); mtDockTimer = null; }
     }
@@ -3111,6 +3164,7 @@ function handleDrag($el, storageKey) {
     } catch (e) {}
 
     const onStart = (e) => {
+        if (el.classList.contains('mt-player-docked')) return;
         if ($(e.target).closest('.moodtube-ctrl, input, button, select, textarea, a').length || $(e.target).closest('#moodtube-resize-handle').length || $(e.target).closest('#moodtube-queue-list').length || $(e.target).closest('#moodtube-playlists-list').length) return;
         if (e.type === 'touchstart') e.preventDefault(); // Prevent mobile screen scrolling when dragging the widget
         startX = e.clientX || e.touches?.[0].clientX; startY = e.clientY || e.touches?.[0].clientY;
@@ -3187,10 +3241,7 @@ function attachToUI() {
                 </div>
             </div>
         `);
-        $('#moodtube-wand-item').on('click', () => {
-            isPlayerFolded = !isPlayerFolded;
-            updatePlayerVisibility();
-        });
+        $('#moodtube-wand-item').on('click', () => togglePlayerUI());
     }
 }
 
@@ -3552,7 +3603,21 @@ async function initializeExtension() {
             backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
         }
         .mt-dock, .mt-dock * { text-shadow: none; }
+        .mt-dock.mt-dock-hidden { display: none; }
         .mt-dock-slot-bg { z-index: 0; background-image: var(--mt-img-dock, none); }
+        .mt-dock-bar { position: relative; z-index: 1; }
+        .mt-dock-panel { position: relative; z-index: 1; }
+        .mt-dock-panel:empty { display: none; }
+        /* Плеер внутри полосы: обычный блок на всю ширину, без перетаскивания и ресайза */
+        .mt-player.mt-player-docked {
+            position: relative !important; left: auto !important; top: auto !important; right: auto !important; bottom: auto !important;
+            transform: none !important; width: 100% !important; height: var(--mt-dock-panel-height, min(340px, 50vh)) !important;
+            z-index: auto; border-radius: 0; border: none; border-top: 1px solid var(--mt-border);
+            box-shadow: none; backdrop-filter: none; -webkit-backdrop-filter: none; background: transparent; cursor: default;
+        }
+        .mt-player.mt-player-docked .mt-resize-handle { display: none; }
+        .mt-player.mt-player-docked .mt-player-body { max-width: var(--mt-dock-panel-max-width, 520px); margin: 0 auto; }
+        .mt-dock-close { font-size: 15px; color: var(--mt-text-dim, #888); }
         .mt-dock-inner {
             position: relative; z-index: 1; display: flex; align-items: center; gap: 10px; box-sizing: border-box;
             min-height: var(--mt-dock-height, 48px); padding: 6px 12px 8px;
@@ -3999,10 +4064,10 @@ async function initializeExtension() {
                                 <hr class="mt-divider">
                                 <span class="mt-label" style="margin-top:0;">Вид плеера</span>
                                 <select id="moodtube-setting-layout" class="mt-input-field">
-                                    <option value="floating">Плавающее окно (по умолчанию)</option>
-                                    <option value="dock">Полоса под шапкой таверны</option>
+                                    <option value="floating">Плавающая плашка (по умолчанию)</option>
+                                    <option value="dock">Шапка сверху (полоса под шапкой таверны)</option>
                                 </select>
-                                <span class="mt-label" style="margin-top:4px; font-size:0.76em;">В виде полосы очередь, плейлисты и поиск открываются кнопкой <i class="fa-solid fa-up-right-and-down-left-from-center"></i> справа.</span>
+                                <span class="mt-label" style="margin-top:4px; font-size:0.76em;">Полоса: <i class="fa-solid fa-chevron-down"></i> раскрывает плеер прямо под ней (очередь, плейлисты, поиск, громкость), <i class="fa-solid fa-xmark"></i> скрывает полосу. Показать/скрыть — долгое нажатие на плавающую кнопку или «MoodTube» в меню расширений.</span>
                                 <hr class="mt-divider">
                                 <label class="mt-checkbox-row">
                                     <input type="checkbox" id="moodtube-setting-fab">
@@ -4357,8 +4422,7 @@ async function initializeExtension() {
                     fabPressTimer = setTimeout(() => {
                         if (!isDragging && !wasDragged) {
                             fabLongPressed = true;
-                            isPlayerFolded = !isPlayerFolded;
-                            updatePlayerVisibility();
+                            togglePlayerUI();
                         }
                     }, 750);
                 });
@@ -5006,7 +5070,7 @@ async function initializeExtension() {
             localStorage.setItem(MT_LAYOUT_KEY, layout);
             applyPlayerLayout();
             // Переключились на полосу — плавающее окно прячем, оно открывается кнопкой на полосе
-            if (layoutChanged && layout === 'dock') { isPlayerFolded = true; updatePlayerVisibility(); syncDock(); }
+            if (layoutChanged && layout === 'dock') { isPlayerFolded = true; updatePlayerVisibility(); setDockHidden(false); }
             if (fabEnabled) $('#moodtube-fab').show(); else $('#moodtube-fab').hide();
             
             localStorage.setItem('moodtube_ai_bulk_count', $('#moodtube-bulk-count').val());
@@ -5105,7 +5169,9 @@ async function initializeExtension() {
                 const h = entry.contentRect.height;
                 const $p = $(entry.target);
                 
-                $p.toggleClass('moodtube-row-layout', w > h * 1.3 && w > 280);
+                // В панели под шапкой — всегда полный вертикальный вид
+                const docked = entry.target.classList.contains('mt-player-docked');
+                $p.toggleClass('moodtube-row-layout', !docked && w > h * 1.3 && w > 280);
                 $p.toggleClass('moodtube-no-cover', (h < 150 && w < 300) || h < 90);
                 $p.toggleClass('moodtube-no-vol', w < 200 || h < 110);
                 $p.toggleClass('moodtube-no-title', h < 70);
