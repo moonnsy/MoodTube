@@ -2087,6 +2087,7 @@ function ensureDockBar() {
                     <i class="fa-solid fa-play mt-dock-btn mt-dock-play" data-mt-proxy="#moodtube-btn-playpause" title="Play / Pause"></i>
                     <i class="fa-solid fa-forward-step mt-dock-btn mt-dock-next" data-mt-proxy="#moodtube-btn-next" title="Следующий"></i>
                     <span class="mt-dock-btn mt-dock-ai" data-mt-proxy="#moodtube-btn-ai" title="Auto-DJ (AI)"><i class="fa-solid fa-wand-magic-sparkles mt-btn-icon"></i></span>
+                    <i class="fa-solid fa-list-ul mt-dock-btn mt-dock-queue" title="Очередь треков"></i>
                     <i class="fa-solid fa-up-right-and-down-left-from-center mt-dock-btn mt-dock-expand" title="Открыть плеер: очередь, плейлисты, поиск, настройки"></i>
                 </div>
             </div>
@@ -2101,6 +2102,22 @@ function ensureDockBar() {
         isPlayerFolded = !isPlayerFolded;
         updatePlayerVisibility();
         $(this).toggleClass('mt-is-open', !isPlayerFolded);
+    });
+    // Очередь: открываем плеер сразу на ней; повторное нажатие прячет плеер
+    $bar.on('click', '.mt-dock-queue', function(e) {
+        e.stopPropagation();
+        const queueOpen = $('#moodtube-mini-player').is(':visible') && $('#moodtube-queue-container').is(':visible');
+        if (queueOpen) {
+            $('#moodtube-btn-close-queue').trigger('click');
+            isPlayerFolded = true;
+        } else {
+            isPlayerFolded = false;
+            updatePlayerVisibility();
+            $('#moodtube-spotify-playlists-container, #moodtube-search-container').hide();
+            $('#moodtube-btn-queue').trigger('click');
+        }
+        updatePlayerVisibility();
+        syncDock();
     });
     // Перемотка: передаём долю основному слайдеру — у него уже есть обработчик seek
     $bar.on('click', '.mt-dock-progress', function(e) {
@@ -2151,17 +2168,18 @@ function syncDock() {
         .toggleClass('mt-dj-busy', busy)
         .attr('data-mt-theme', $p.attr('data-mt-theme') || '');
     $d.find('.mt-dock-expand').toggleClass('mt-is-open', $p.is(':visible'));
+    $d.find('.mt-dock-queue').toggleClass('mt-is-open', $p.is(':visible') && $('#moodtube-queue-container').is(':visible'));
     syncDockProgress();
 }
 
 function observeForDock() {
     if (mtDockObserved) return;
-    const els = ['moodtube-widget-title', 'moodtube-label-subtitle', 'moodtube-widget-cover', 'moodtube-btn-playpause', 'moodtube-btn-favorite', 'moodtube-btn-ai', 'moodtube-mini-player']
+    const els = ['moodtube-widget-title', 'moodtube-label-subtitle', 'moodtube-widget-cover', 'moodtube-btn-playpause', 'moodtube-btn-favorite', 'moodtube-btn-ai', 'moodtube-mini-player', 'moodtube-queue-container']
         .map(id => document.getElementById(id)).filter(Boolean);
     if (!els.length) return;
     mtDockObserved = true;
     const obs = new MutationObserver(() => { if (getPlayerLayout() === 'dock') syncDock(); });
-    els.forEach(el => obs.observe(el, el.id === 'moodtube-mini-player'
+    els.forEach(el => obs.observe(el, (el.id === 'moodtube-mini-player' || el.id === 'moodtube-queue-container')
         ? { attributes: true, attributeFilter: ['data-mt-state', 'data-mt-theme', 'style'] }
         : { attributes: true, attributeFilter: ['class', 'src'], childList: true, characterData: true, subtree: true }));
 }
@@ -3555,14 +3573,19 @@ async function initializeExtension() {
         .mt-dock-fav, .mt-dock-ai { color: var(--mt-accent); }
         .mt-dock-ai { display: inline-flex; align-items: center; justify-content: center; }
         .mt-dock-ai.mt-is-busy { color: #00ff00; }
+        .mt-dock-queue { font-size: 15px; color: var(--mt-accent); }
+        .mt-dock-queue.mt-is-open { color: var(--mt-accent-hover, var(--mt-accent)); text-shadow: 0 0 6px var(--mt-accent); }
         .mt-dock-expand { font-size: 13px; color: var(--mt-text-dim, #888); }
         .mt-dock-expand.mt-is-open { color: var(--mt-accent); }
         .mt-dock-progress { position: absolute; left: 0; right: 0; bottom: 0; z-index: 2; height: 3px; cursor: pointer; background: var(--mt-dock-track, rgba(255,255,255,0.08)); }
         .mt-dock-progress::before { content: ''; position: absolute; left: 0; right: 0; bottom: 0; height: 12px; }
         .mt-dock-progress-fill { height: 100%; width: 0; background: var(--mt-dock-progress, var(--mt-accent)); transition: width 0.5s linear; }
         .mt-dock.mt-is-idle .mt-dock-progress-fill { width: 0 !important; }
+        @media (max-width: 420px) {
+            .mt-dock-controls { gap: 12px; }
+        }
         @media (max-width: 340px) {
-            .mt-dock-controls { gap: 11px; }
+            .mt-dock-controls { gap: 10px; }
             .mt-dock-fav { display: none; }
         }
 

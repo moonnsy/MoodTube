@@ -178,14 +178,14 @@
 В окне настроек: `.mt-subpanel` (подпанели), `.mt-theme-editor` (редактор темы), `.mt-spotify-settings`, `.mt-divider`, `.mt-label-strong`, `.mt-label-accent`, `.mt-status-text`. Плашки `code` берут фон `--mt-bg-input`. Рамка окна `.mt-flex-container` стилизуется через `#mt-settings-modal .mt-flex-container`: так тема таверны её не перебивает, а в своей теме пишите селектор с той же специфичностью.
 
 
-**Вид «Полоса под шапкой таверны»** («Интерфейс → Вид плеера»). Это узкая полоса прямо над чатом: она стоит в `#sheld` перед `#chat`, поэтому чат сдвигается вниз, а не перекрывается. Кнопка справа открывает полный плеер с очередью, плейлистами, поиском и настройками.
+**Вид «Полоса под шапкой таверны»** («Интерфейс → Вид плеера»). Это узкая полоса прямо над чатом: она стоит в `#sheld` перед `#chat`, поэтому чат сдвигается вниз, а не перекрывается. Кнопка ☰ открывает плеер сразу на очереди, кнопка справа — полный плеер с плейлистами, поиском и настройками.
 ```
 .mt-dock#moodtube-dock                 те же классы состояния: .mt-is-playing / .mt-is-paused / .mt-is-idle, [data-mt-state], .mt-dj-busy
 ├─ .mt-slot.mt-dock-slot-bg            картинка --mt-img-dock
 ├─ .mt-dock-inner
 │  ├─ .mt-dock-cover > .mt-dock-cover-img
 │  ├─ .mt-dock-info > .mt-dock-title, .mt-dock-subtitle   (подпись берётся из «Подпись под треком»)
-│  └─ .mt-dock-controls > .mt-dock-fav(.mt-is-active), .mt-dock-prev, .mt-dock-play, .mt-dock-next, .mt-dock-ai(.mt-is-busy), .mt-dock-expand(.mt-is-open)
+│  └─ .mt-dock-controls > .mt-dock-fav(.mt-is-active), .mt-dock-prev, .mt-dock-play, .mt-dock-next, .mt-dock-ai(.mt-is-busy), .mt-dock-queue(.mt-is-open), .mt-dock-expand(.mt-is-open)
 └─ .mt-dock-progress > .mt-dock-progress-fill   (клик — перемотка)
 ```
 Переменные: `--mt-dock-height` (48px), `--mt-dock-bg`, `--mt-dock-cover-size` (36px), `--mt-dock-cover-radius` (50%), `--mt-dock-track`, `--mt-dock-progress`. Когда включён этот вид, у `body` есть класс `.mt-layout-dock`.
