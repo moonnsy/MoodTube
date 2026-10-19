@@ -2110,8 +2110,6 @@ function ensureDockBar() {
     $bar.on('click', '.mt-dock-close', function(e) {
         e.stopPropagation();
         setDockHidden(true);
-        const fabOn = localStorage.getItem('moodtube_fab_enable') !== 'false';
-        toastr.info(fabOn ? 'Полоса скрыта. Долгое нажатие на плавающую кнопку вернёт её.' : 'Полоса скрыта. Вернуть: меню расширений → MoodTube.', 'MoodTube', { preventDuplicates: true });
     });
     // Очередь: открываем плеер сразу на ней; повторное нажатие прячет плеер
     $bar.on('click', '.mt-dock-queue', function(e) {
@@ -3935,7 +3933,7 @@ async function initializeExtension() {
 }
 .mt-catalog-filter.mt-is-active { background: var(--mt-accent); border-color: var(--mt-accent); color: var(--mt-text-on-accent, #111827); font-weight: 600; }
 /* Сетка: 2 колонки в окне настроек и на телефоне, больше — если окно шире */
-.mt-catalog-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 8px; max-height: 560px; overflow-y: auto; padding-right: 2px; }
+.mt-catalog-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(120px, 100%), 1fr)); gap: 8px; }
 .mt-catalog-card {
     display: flex; flex-direction: column; min-width: 0; overflow: hidden;
     border-radius: 10px; background: var(--mt-bg-input); border: 1px solid var(--mt-border);
@@ -3994,6 +3992,17 @@ async function initializeExtension() {
                                 <i class="fa-solid fa-chevron-down mt-chevron"></i>
                             </div>
                             <div class="mt-cat-content" id="mt-cat-ui">
+                                <label class="mt-checkbox-row">
+                                    <input type="checkbox" id="moodtube-setting-fab">
+                                    <span>Включить плавающую кнопку</span>
+                                </label>
+                                <hr class="mt-divider">
+                                <span class="mt-label" style="margin-top:0;">Вид плеера</span>
+                                <select id="moodtube-setting-layout" class="mt-input-field">
+                                    <option value="floating">Плавающая плашка (по умолчанию)</option>
+                                    <option value="dock">Шапка сверху (полоса под шапкой таверны)</option>
+                                </select>
+                                <hr class="mt-divider">
                                 <span class="mt-label" style="margin-top:0;">Тема оформления</span>
                                 <select id="moodtube-setting-theme" class="mt-input-field">
                                     <option value="blue">Blue (Default)</option>
@@ -4061,18 +4070,6 @@ async function initializeExtension() {
                                     <input type="file" id="mt-custom-theme-file" accept=".json,application/json" style="display:none;">
                                     <span class="mt-label" style="margin-top:6px; font-size:0.74em;">Импорт принимает JSON MoodTube и JSON-темы SillyTavern (берётся custom_css и основные цвета).</span>
                                 </div>
-                                <hr class="mt-divider">
-                                <span class="mt-label" style="margin-top:0;">Вид плеера</span>
-                                <select id="moodtube-setting-layout" class="mt-input-field">
-                                    <option value="floating">Плавающая плашка (по умолчанию)</option>
-                                    <option value="dock">Шапка сверху (полоса под шапкой таверны)</option>
-                                </select>
-                                <span class="mt-label" style="margin-top:4px; font-size:0.76em;">Полоса: <i class="fa-solid fa-chevron-down"></i> раскрывает плеер прямо под ней (очередь, плейлисты, поиск, громкость), <i class="fa-solid fa-xmark"></i> скрывает полосу. Показать/скрыть — долгое нажатие на плавающую кнопку или «MoodTube» в меню расширений.</span>
-                                <hr class="mt-divider">
-                                <label class="mt-checkbox-row">
-                                    <input type="checkbox" id="moodtube-setting-fab">
-                                    <span>Включить плавающую кнопку</span>
-                                </label>
                             </div>
                         </div>
 
