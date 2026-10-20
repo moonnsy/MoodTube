@@ -2795,8 +2795,8 @@ async function triggerMoodAnalysisAndPlay() {
             return;
         }
         
-        const snippet = buildSceneSnippet(context);
-        const sceneBackground = buildSceneBackground(context);
+        const snippet = censorText(buildSceneSnippet(context));
+        const sceneBackground = censorText(buildSceneBackground(context));
 
         let genre = getMtSetting('genre');
         let scenario = getMtSetting('scenario');
@@ -2989,6 +2989,29 @@ function cleanMessageForDJ(text) {
 function truncateForDJ(text, limit) {
     if (text.length <= limit) return text;
     return '…' + text.slice(text.length - limit);
+}
+
+// «Цензура»: обычные пробелы в контексте чата для ИИ заменяются невидимым аналогом
+const MT_CENSOR_KEY = 'moodtube_censor';
+const MT_CENSOR_CHAR_KEY = 'moodtube_censor_char';
+const MT_CENSOR_CHARS = {
+    '2005': 'Пробел ¼ em (U+2005)',
+    '00a0': 'Неразрывный пробел (U+00A0)',
+    '2002': 'Пробел en (U+2002)',
+    '2009': 'Тонкий пробел (U+2009)',
+    '3000': 'Широкий пробел (U+3000)',
+};
+function isCensorOn() {
+    try { return localStorage.getItem(MT_CENSOR_KEY) === 'true'; } catch (e) { return false; }
+}
+function getCensorCode() {
+    let c = '';
+    try { c = localStorage.getItem(MT_CENSOR_CHAR_KEY) || ''; } catch (e) {}
+    return MT_CENSOR_CHARS[c] ? c : '2005';
+}
+function censorText(text) {
+    if (!isCensorOn()) return text;
+    return String(text || '').replace(/ /g, String.fromCodePoint(parseInt(getCensorCode(), 16)));
 }
 
 function buildSceneSnippet(context) {
@@ -3917,6 +3940,9 @@ async function initializeExtension() {
 .mt-label-accent { color: var(--mt-accent); }
 .mt-input-field.mt-input-readonly { background: rgba(0,0,0,0.4); color: var(--mt-text-dim, #9CA3AF); }
 .mt-status-text { margin-top: 8px; font-size: 0.85em; color: var(--mt-text-dim, #9CA3AF); }
+.mt-censor { margin-top: 14px; padding: 12px 16px; border-radius: 12px; background-color: var(--mt-bg-secondary); border: 1px solid var(--mt-border); }
+.mt-censor .mt-checkbox-row { font-weight: 600; }
+.mt-censor-char { margin-top: 8px; }
 .mt-catalog-row { display: flex; gap: 6px; align-items: center; }
 .mt-catalog-row .mt-input-field { flex: 1; min-width: 0; }
 .mt-catalog-row .mt-btn-test { width: auto; margin-top: 0; padding: 8px 12px; white-space: nowrap; flex-shrink: 0; }
@@ -4288,6 +4314,16 @@ async function initializeExtension() {
                                 <span class="mt-label" style="margin-top:4px; font-size:0.78em;">Макросы: <b>{{snippet}}</b> — история чата, <b>{{history}}</b> — проигранные треки</span>
                                 <textarea id="moodtube-setting-custom" class="mt-input-field" style="resize:vertical; min-height:100px; margin-top:8px;"></textarea>
                             </div>
+                        </div>
+
+                        <div class="mt-censor">
+                            <label class="mt-checkbox-row">
+                                <input type="checkbox" id="moodtube-setting-censor">
+                                <span>Цензура</span>
+                            </label>
+                            <select id="moodtube-setting-censor-char" class="mt-input-field mt-censor-char">
+                                ${Object.entries(MT_CENSOR_CHARS).map(([code, label]) => `<option value="${code}">${label}</option>`).join('')}
+                            </select>
                         </div>
 
                     </div>
@@ -4923,6 +4959,8 @@ async function initializeExtension() {
             $('#moodtube-setting-favorites-context').prop('checked', getMtSetting('favorites_context') === 'true');
             $('#moodtube-setting-hard-rule').val(getMtSetting('hard_rule'));
             $('#moodtube-setting-custom').val(getMtSetting('custom'));
+            $('#moodtube-setting-censor').prop('checked', isCensorOn());
+            $('#moodtube-setting-censor-char').val(getCensorCode()).toggle(isCensorOn());
 
             // Restore active tags from localStorage
             const savedGenres = getMtSetting('genre').split(',').map(s => s.trim()).filter(Boolean);
@@ -5036,6 +5074,7 @@ async function initializeExtension() {
         });
         $('#mt-custom-theme-export').on('click', exportCustomTheme);
         $('#mt-catalog-load').on('click', () => loadThemeCatalog($('#mt-catalog-url').val()));
+        $('#moodtube-setting-censor').on('change', function() { $('#moodtube-setting-censor-char').toggle(this.checked); });
         $('#mt-catalog-url').on('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); loadThemeCatalog($('#mt-catalog-url').val()); } });
         $('#mt-custom-theme-reset').on('click', () => {
             if (!confirm('Сбросить кастомную тему к значениям по умолчанию?')) return;
@@ -5093,6 +5132,8 @@ async function initializeExtension() {
             saveMtSetting('favorites_context', $('#moodtube-setting-favorites-context').is(':checked') ? 'true' : 'false');
             saveMtSetting('hard_rule', $('#moodtube-setting-hard-rule').val().trim());
             saveMtSetting('custom', $('#moodtube-setting-custom').val().trim());
+            localStorage.setItem(MT_CENSOR_KEY, $('#moodtube-setting-censor').is(':checked') ? 'true' : 'false');
+            localStorage.setItem(MT_CENSOR_CHAR_KEY, $('#moodtube-setting-censor-char').val() || '2005');
 
             toastr.success("Настройки MoodTube сохранены");
             $('#mt-settings-modal').hide();
