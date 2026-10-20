@@ -2063,6 +2063,7 @@ function saveMtSetting(key, val) {
 // ============================================================
 const MT_LAYOUT_KEY = 'moodtube_player_layout';
 let mtDockTimer = null;
+let mtDockScrubbing = false;
 let mtDockObserved = false;
 
 function getPlayerLayout() {
@@ -2127,12 +2128,42 @@ function ensureDockBar() {
         updatePlayerVisibility();
         syncDock();
     });
-    // Перемотка: передаём долю основному слайдеру — у него уже есть обработчик seek
-    $bar.on('click', '.mt-dock-progress', function(e) {
-        const rect = this.getBoundingClientRect();
-        const ratio = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
-        $('#moodtube-progress-slider').val(Math.round(ratio * 100)).trigger('input').trigger('change');
+    // Перемотка: тап или проведение пальцем по полосе хода. Долю передаём основному слайдеру —
+    // у него уже есть обработчик seek. Пока палец ведёт, полоса показывает новое место.
+    const prog = $bar.find('.mt-dock-progress')[0];
+    const ratioAt = (e) => {
+        const rect = prog.getBoundingClientRect();
+        return Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
+    };
+    prog.addEventListener('pointerdown', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        mtDockScrubbing = true;
+        try { prog.setPointerCapture(e.pointerId); } catch (err) {}
+        $bar.addClass('mt-dock-scrubbing');
+        $bar.find('.mt-dock-progress-fill').css('width', `${ratioAt(e) * 100}%`);
+    });
+    prog.addEventListener('pointermove', (e) => {
+        if (!mtDockScrubbing) return;
+        e.preventDefault();
+        $bar.find('.mt-dock-progress-fill').css('width', `${ratioAt(e) * 100}%`);
+    });
+    const finishScrub = (e, apply) => {
+        if (!mtDockScrubbing) return;
+        mtDockScrubbing = false;
+        $bar.removeClass('mt-dock-scrubbing');
+        try { prog.releasePointerCapture(e.pointerId); } catch (err) {}
+        if (apply) $('#moodtube-progress-slider').val(Math.round(ratioAt(e) * 100)).trigger('input').trigger('change');
         syncDockProgress();
+    };
+    prog.addEventListener('pointerup', (e) => finishScrub(e, true));
+    prog.addEventListener('pointercancel', (e) => finishScrub(e, false));
+    prog.addEventListener('click', (e) => e.stopPropagation());
+
+    // Таверна свайпает последний ответ бота при свайпе в любом месте #sheld (а полоса живёт там).
+    // Её жесты — события swiped-* от lib/swiped-events.js, всплывающие до document: гасим их на полосе.
+    ['swiped-left', 'swiped-right', 'swiped-up', 'swiped-down'].forEach(type => {
+        $bar[0].addEventListener(type, (e) => e.stopPropagation());
     });
     return $bar;
 }
@@ -2186,6 +2217,7 @@ function mountDockBar() {
 }
 
 function syncDockProgress() {
+    if (mtDockScrubbing) return;
     const v = Number($('#moodtube-progress-slider').val()) || 0;
     $('#moodtube-dock .mt-dock-progress-fill').css('width', `${Math.min(100, Math.max(0, v))}%`);
 }
@@ -3664,7 +3696,10 @@ async function initializeExtension() {
         .mt-dock-expand { font-size: 13px; color: var(--mt-text-dim, #888); }
         .mt-dock-expand.mt-is-open { color: var(--mt-accent); }
         .mt-dock-progress { position: absolute; left: 0; right: 0; bottom: 0; z-index: 2; height: 3px; cursor: pointer; background: var(--mt-dock-track, rgba(255,255,255,0.08)); }
-        .mt-dock-progress::before { content: ''; position: absolute; left: 0; right: 0; bottom: 0; height: 12px; }
+        .mt-dock-progress { touch-action: none; }
+        .mt-dock-progress::before { content: ''; position: absolute; left: 0; right: 0; bottom: 0; height: 16px; }
+        .mt-dock.mt-dock-scrubbing .mt-dock-progress-fill { transition: none; }
+        .mt-dock.mt-dock-scrubbing .mt-dock-progress { height: 5px; }
         .mt-dock-progress-fill { height: 100%; width: 0; background: var(--mt-dock-progress, var(--mt-accent)); transition: width 0.5s linear; }
         .mt-dock.mt-is-idle .mt-dock-progress-fill { width: 0 !important; }
         @media (max-width: 420px) {
