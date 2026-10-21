@@ -2471,13 +2471,204 @@ function setCustomImageField(key, src) {
     $(`#mt-custom-img-preview-${key}`).css('background-image', cssUrlValue(src) || 'none');
 }
 
+// --- ВЫБОР ЦВЕТА ---
+// Свой вместо input[type=color]: на Android системный диалог даёт 8 цветов и не умеет прозрачность,
+// а переменные тем часто в rgba. Поле оттенка + ползунки цвета и прозрачности + готовые цвета + HEX/rgba.
+const MT_CPICK_PRESETS = [
+    '#000000', '#ffffff', '#c0c0c0', '#808080', '#2e2e32', '#18181b', '#e6e6e6', '#9ca3af',
+    '#8db7d5', '#1084d0', '#000080', '#8ab4ff', '#86bfa0', '#5fd16a', '#e0709a', '#b87575',
+    '#ff7a6e', '#ffd166', 'rgba(15, 20, 25, 0.88)', 'rgba(255, 255, 255, 0.08)',
+];
+let mtCpickCtx = null;
+let mtCpick = null; // { key, original, h, s, v, a }
+
+function mtParseColor(str) {
+    str = String(str || '').trim();
+    if (!str) return null;
+    if (!mtCpickCtx) mtCpickCtx = document.createElement('canvas').getContext('2d');
+    const ctx = mtCpickCtx;
+    // Неверный цвет canvas игнорирует — проверяем двумя разными «заглушками»
+    ctx.fillStyle = '#010203'; ctx.fillStyle = str; const r1 = ctx.fillStyle;
+    ctx.fillStyle = '#030201'; ctx.fillStyle = str; const r2 = ctx.fillStyle;
+    if (r1 !== r2) return null;
+    let m = r1.match(/^#([0-9a-f]{6})$/i);
+    if (m) { const n = parseInt(m[1], 16); return { r: (n >> 16) & 255, g: (n >> 8) & 255, b: n & 255, a: 1 }; }
+    m = r1.match(/rgba?\(([^)]+)\)/i);
+    if (m) { const p = m[1].split(',').map(x => parseFloat(x)); return { r: p[0], g: p[1], b: p[2], a: p.length > 3 ? p[3] : 1 }; }
+    return null;
+}
+
+function mtRgbToHsv({ r, g, b }) {
+    r /= 255; g /= 255; b /= 255;
+    const max = Math.max(r, g, b), min = Math.min(r, g, b), d = max - min;
+    let h = 0;
+    if (d) {
+        if (max === r) h = ((g - b) / d) % 6;
+        else if (max === g) h = (b - r) / d + 2;
+        else h = (r - g) / d + 4;
+        h *= 60; if (h < 0) h += 360;
+    }
+    return { h, s: max ? d / max : 0, v: max };
+}
+
+function mtHsvToRgb(h, s, v) {
+    const c = v * s, x = c * (1 - Math.abs(((h / 60) % 2) - 1)), m = v - c;
+    let r = 0, g = 0, b = 0;
+    if (h < 60) [r, g, b] = [c, x, 0];
+    else if (h < 120) [r, g, b] = [x, c, 0];
+    else if (h < 180) [r, g, b] = [0, c, x];
+    else if (h < 240) [r, g, b] = [0, x, c];
+    else if (h < 300) [r, g, b] = [x, 0, c];
+    else [r, g, b] = [c, 0, x];
+    return { r: Math.round((r + m) * 255), g: Math.round((g + m) * 255), b: Math.round((b + m) * 255) };
+}
+
+function mtFormatColor(rgb, a) {
+    if (a >= 0.995) return '#' + [rgb.r, rgb.g, rgb.b].map(n => n.toString(16).padStart(2, '0')).join('');
+    return `rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, ${Math.round(a * 100) / 100})`;
+}
+
+// Цвет поля, а если оно пустое (необязательные цвета текста) — значение по умолчанию
+function mtVarFieldColor(key) {
+    const v = MT_THEME_VARS.find(x => x.key === key);
+    const val = String($(`#mt-custom-var-${key}`).val() || '').trim();
+    return val || (v && (v.def || v.hint)) || '#000000';
+}
+
+function mtUpdateSwatch(key) {
+    const c = mtParseColor(mtVarFieldColor(key));
+    $(`#mt-custom-pick-${key} .mt-cpick-swatch-color`).css('background', c ? mtFormatColor(c, c.a) : 'transparent');
+}
+
+function mtEnsureColorPicker() {
+    let $p = $('#mt-cpick');
+    if ($p.length) return $p;
+    $p = $(`
+        <div id="mt-cpick" class="mt-cpick" style="display:none;">
+            <div class="mt-cpick-backdrop"></div>
+            <div class="mt-cpick-box" role="dialog">
+                <div class="mt-cpick-title"></div>
+                <div class="mt-cpick-sv"><div class="mt-cpick-sv-white"></div><div class="mt-cpick-sv-black"></div><div class="mt-cpick-sv-handle"></div></div>
+                <div class="mt-cpick-slider mt-cpick-hue"><div class="mt-cpick-thumb"></div></div>
+                <div class="mt-cpick-slider mt-cpick-alpha"><div class="mt-cpick-alpha-fill"></div><div class="mt-cpick-thumb"></div></div>
+                <div class="mt-cpick-row">
+                    <div class="mt-cpick-preview"><span></span></div>
+                    <input type="text" id="mt-cpick-input" class="mt-cpick-input" spellcheck="false" autocomplete="off">
+                </div>
+                <div class="mt-cpick-presets"></div>
+                <div class="mt-cpick-actions">
+                    <button type="button" class="mt-cpick-cancel">Отмена</button>
+                    <button type="button" class="mt-cpick-ok">Готово</button>
+                </div>
+            </div>
+        </div>`).appendTo('body');
+
+    MT_CPICK_PRESETS.forEach(c => {
+        $('<button type="button" class="mt-cpick-preset"><span></span></button>').attr('title', c).attr('data-color', c)
+            .find('span').css('background', c).end().appendTo($p.find('.mt-cpick-presets'));
+    });
+
+    // Перетаскивание по полю оттенка и ползункам (палец и мышь)
+    const drag = (sel, onPos) => {
+        const el = $p.find(sel)[0];
+        const pos = (e) => {
+            const r = el.getBoundingClientRect();
+            onPos(Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)), Math.min(1, Math.max(0, (e.clientY - r.top) / r.height)));
+            mtCpickApply();
+        };
+        el.addEventListener('pointerdown', (e) => { e.preventDefault(); try { el.setPointerCapture(e.pointerId); } catch (err) {} el.dataset.drag = '1'; pos(e); });
+        el.addEventListener('pointermove', (e) => { if (el.dataset.drag) pos(e); });
+        const end = (e) => { delete el.dataset.drag; try { el.releasePointerCapture(e.pointerId); } catch (err) {} };
+        el.addEventListener('pointerup', end);
+        el.addEventListener('pointercancel', end);
+    };
+    drag('.mt-cpick-sv', (x, y) => { mtCpick.s = x; mtCpick.v = 1 - y; });
+    drag('.mt-cpick-hue', (x) => { mtCpick.h = Math.min(359.9, x * 360); });
+    drag('.mt-cpick-alpha', (x) => { mtCpick.a = Math.round(x * 100) / 100; });
+
+    $p.on('click', '.mt-cpick-preset', function() { mtCpickSet($(this).attr('data-color')); mtCpickApply(); });
+    $p.find('#mt-cpick-input').on('input', function() {
+        if (mtCpickSet(this.value)) mtCpickApply(false);
+    }).on('keydown', function(e) {
+        if (e.key === 'Enter') { e.preventDefault(); mtCloseColorPicker(true); }
+        if (e.key === 'Escape') { e.preventDefault(); mtCloseColorPicker(false); }
+    }).on('blur', () => mtCpickRender(true));
+    $p.find('.mt-cpick-ok, .mt-cpick-backdrop').on('click', () => mtCloseColorPicker(true));
+    $p.find('.mt-cpick-cancel').on('click', () => mtCloseColorPicker(false));
+    return $p;
+}
+
+function mtCpickSet(str) {
+    const c = mtParseColor(str);
+    if (!c || !mtCpick) return false;
+    const hsv = mtRgbToHsv(c);
+    // У серых оттенок не определён — оставляем прежний, чтобы ползунок не прыгал
+    mtCpick.h = hsv.s ? hsv.h : mtCpick.h;
+    mtCpick.s = hsv.s; mtCpick.v = hsv.v; mtCpick.a = c.a;
+    return true;
+}
+
+function mtCpickValue() {
+    return mtFormatColor(mtHsvToRgb(mtCpick.h, mtCpick.s, mtCpick.v), mtCpick.a);
+}
+
+function mtCpickRender(updateText = true) {
+    if (!mtCpick) return;
+    const $p = $('#mt-cpick');
+    const rgb = mtHsvToRgb(mtCpick.h, mtCpick.s, mtCpick.v);
+    const solid = `rgb(${rgb.r}, ${rgb.g}, ${rgb.b})`;
+    const value = mtCpickValue();
+    $p.find('.mt-cpick-sv').css('background-color', `hsl(${mtCpick.h}, 100%, 50%)`);
+    $p.find('.mt-cpick-sv-handle').css({ left: `${mtCpick.s * 100}%`, top: `${(1 - mtCpick.v) * 100}%`, background: solid });
+    $p.find('.mt-cpick-hue .mt-cpick-thumb').css('left', `${(mtCpick.h / 360) * 100}%`);
+    $p.find('.mt-cpick-alpha-fill').css('background', `linear-gradient(90deg, rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, 0), ${solid})`);
+    $p.find('.mt-cpick-alpha .mt-cpick-thumb').css('left', `${mtCpick.a * 100}%`);
+    $p.find('.mt-cpick-preview span').css('background', value);
+    if (updateText) $p.find('#mt-cpick-input').val(value);
+}
+
+// Применить к полю переменной: превью темы и квадратик обновятся через обработчик поля
+function mtCpickApply(updateText = true) {
+    mtCpickRender(updateText);
+    $(`#mt-custom-var-${mtCpick.key}`).val(mtCpickValue()).trigger('input');
+}
+
+function mtOpenColorPicker(key, anchor) {
+    const $p = mtEnsureColorPicker();
+    const v = MT_THEME_VARS.find(x => x.key === key);
+    mtCpick = { key, original: String($(`#mt-custom-var-${key}`).val() || ''), h: 0, s: 0, v: 0, a: 1 };
+    mtCpickSet(mtVarFieldColor(key));
+    $p.find('.mt-cpick-title').text(v ? v.label : key);
+    $p.attr('data-mt-theme', document.documentElement.getAttribute('data-mt-theme') || '');
+    $p.css('display', 'block');
+    mtCpickRender(true);
+
+    // Телефон — шторка снизу, компьютер — рядом с квадратиком
+    const $box = $p.find('.mt-cpick-box');
+    const sheet = window.innerWidth < 600;
+    $p.toggleClass('mt-cpick-sheet', sheet);
+    if (sheet) { $box.css({ left: '', top: '' }); return; }
+    const r = anchor.getBoundingClientRect();
+    const w = $box.outerWidth(), h = $box.outerHeight();
+    let left = Math.min(Math.max(8, r.left), window.innerWidth - w - 8);
+    let top = r.bottom + 6;
+    if (top + h > window.innerHeight - 8) top = Math.max(8, r.top - h - 6);
+    $box.css({ left: `${left}px`, top: `${top}px` });
+}
+
+function mtCloseColorPicker(keep) {
+    if (!mtCpick) return;
+    if (!keep) $(`#mt-custom-var-${mtCpick.key}`).val(mtCpick.original).trigger('input');
+    mtCpick = null;
+    $('#mt-cpick').hide();
+}
+
 function fillCustomThemeForm(theme) {
     theme = normalizeCustomTheme(theme);
     $('#mt-custom-theme-name').val(theme.name);
     MT_THEME_VARS.forEach(v => {
         $(`#mt-custom-var-${v.key}`).val(theme.vars[v.key]);
-        const hex = /^#[0-9a-f]{6}$/i.test(theme.vars[v.key]) ? theme.vars[v.key] : null;
-        if (hex) $(`#mt-custom-pick-${v.key}`).val(hex);
+        mtUpdateSwatch(v.key);
     });
     MT_THEME_IMAGES.forEach(v => setCustomImageField(v.key, theme.images[v.key]));
     MT_THEME_LABELS.forEach(v => $(`#mt-custom-label-${v.key}`).val(theme.labels[v.key]));
@@ -3975,6 +4166,73 @@ async function initializeExtension() {
 .mt-label-accent { color: var(--mt-accent); }
 .mt-input-field.mt-input-readonly { background: rgba(0,0,0,0.4); color: var(--mt-text-dim, #9CA3AF); }
 .mt-status-text { margin-top: 8px; font-size: 0.85em; color: var(--mt-text-dim, #9CA3AF); }
+/* Выбор цвета */
+.mt-cpick-swatch {
+    width: 34px; height: 30px; flex-shrink: 0; padding: 3px; box-sizing: border-box; cursor: pointer;
+    border: 1px solid var(--mt-border); border-radius: 8px;
+    background: repeating-conic-gradient(#9a9a9a 0 25%, #ffffff 0 50%) 0 0 / 8px 8px;
+}
+.mt-cpick-swatch-color { display: block; width: 100%; height: 100%; border-radius: 5px; }
+.mt-cpick { position: fixed; inset: 0; z-index: 2147483000; font-family: 'Inter', 'Segoe UI', sans-serif; text-shadow: none; }
+.mt-cpick * { text-shadow: none; box-sizing: border-box; }
+.mt-cpick-backdrop { position: absolute; inset: 0; background: transparent; }
+.mt-cpick.mt-cpick-sheet .mt-cpick-backdrop { background: var(--mt-overlay, rgba(0,0,0,0.45)); }
+.mt-cpick-box {
+    position: absolute; width: 264px; padding: 12px; display: flex; flex-direction: column; gap: 10px;
+    background: var(--mt-bg-primary); background: linear-gradient(var(--mt-bg-primary), var(--mt-bg-primary)), var(--mt-bg-solid, #10151c);
+    border: 1px solid var(--mt-border); border-radius: 12px; box-shadow: 0 12px 30px rgba(0,0,0,0.55);
+    color: var(--mt-text, #E5E7EB);
+}
+.mt-cpick.mt-cpick-sheet .mt-cpick-box {
+    left: 0; right: 0; bottom: 0; width: auto; padding: 14px 16px calc(14px + env(safe-area-inset-bottom));
+    border-radius: 16px 16px 0 0; border-bottom: none;
+}
+.mt-cpick-title { font-size: 0.85em; font-weight: 600; color: var(--mt-text-dim, #9CA3AF); }
+.mt-cpick-sv { position: relative; height: 150px; border-radius: 8px; touch-action: none; cursor: crosshair; }
+.mt-cpick.mt-cpick-sheet .mt-cpick-sv { height: 190px; }
+.mt-cpick-sv-white, .mt-cpick-sv-black { position: absolute; inset: 0; border-radius: inherit; pointer-events: none; }
+.mt-cpick-sv-white { background: linear-gradient(90deg, #fff, rgba(255,255,255,0)); }
+.mt-cpick-sv-black { background: linear-gradient(0deg, #000, rgba(0,0,0,0)); }
+.mt-cpick-sv-handle {
+    position: absolute; width: 18px; height: 18px; margin: -9px 0 0 -9px; border-radius: 50%; pointer-events: none;
+    border: 2px solid #fff; box-shadow: 0 0 0 1px rgba(0,0,0,0.5), 0 1px 4px rgba(0,0,0,0.5);
+}
+.mt-cpick-slider { position: relative; height: 16px; border-radius: 8px; touch-action: none; cursor: pointer; }
+.mt-cpick.mt-cpick-sheet .mt-cpick-slider { height: 22px; border-radius: 11px; }
+.mt-cpick-hue { background: linear-gradient(90deg, #f00, #ff0, #0f0, #0ff, #00f, #f0f, #f00); }
+.mt-cpick-alpha { background: repeating-conic-gradient(#9a9a9a 0 25%, #ffffff 0 50%) 0 0 / 8px 8px; }
+.mt-cpick-alpha-fill { position: absolute; inset: 0; border-radius: inherit; }
+.mt-cpick-thumb {
+    position: absolute; top: 50%; width: 18px; height: 18px; margin: -9px 0 0 -9px; border-radius: 50%; pointer-events: none;
+    background: #fff; box-shadow: 0 0 0 1px rgba(0,0,0,0.4), 0 1px 4px rgba(0,0,0,0.5);
+}
+.mt-cpick.mt-cpick-sheet .mt-cpick-thumb { width: 24px; height: 24px; margin: -12px 0 0 -12px; }
+.mt-cpick-row { display: flex; gap: 8px; align-items: center; }
+.mt-cpick-preview {
+    width: 36px; height: 34px; flex-shrink: 0; border-radius: 8px; overflow: hidden; border: 1px solid var(--mt-border);
+    background: repeating-conic-gradient(#9a9a9a 0 25%, #ffffff 0 50%) 0 0 / 8px 8px;
+}
+.mt-cpick-preview span { display: block; width: 100%; height: 100%; }
+#mt-cpick #mt-cpick-input, #mt-cpick #mt-cpick-input:focus {
+    flex: 1 1 auto !important; width: 100% !important; min-width: 0 !important; height: 34px !important; margin: 0 !important;
+    padding: 0 10px !important; box-sizing: border-box !important; transform: none !important; box-shadow: none !important; outline: none !important;
+    border: 1px solid var(--mt-border) !important; border-radius: 8px !important;
+    background: var(--mt-bg-input, rgba(0,0,0,0.3)) !important; color: var(--mt-text, #E5E7EB) !important;
+    font-family: ui-monospace, Consolas, monospace !important; font-size: 13px !important;
+}
+#mt-cpick #mt-cpick-input:focus { border-color: var(--mt-accent) !important; }
+.mt-cpick-presets { display: grid; grid-template-columns: repeat(10, 1fr); gap: 5px; }
+.mt-cpick-preset {
+    aspect-ratio: 1; padding: 0; overflow: hidden; cursor: pointer; border-radius: 6px; border: 1px solid var(--mt-border);
+    background: repeating-conic-gradient(#9a9a9a 0 25%, #ffffff 0 50%) 0 0 / 6px 6px;
+}
+.mt-cpick-preset span { display: block; width: 100%; height: 100%; }
+.mt-cpick-actions { display: flex; gap: 8px; }
+.mt-cpick-actions button {
+    flex: 1; height: 36px; margin: 0; padding: 0 10px; border-radius: 8px; cursor: pointer; font-family: inherit; font-size: 0.9em; font-weight: 600;
+    border: 1px solid var(--mt-border); background: rgba(255,255,255,0.07); color: var(--mt-text, #E5E7EB);
+}
+.mt-cpick-actions .mt-cpick-ok { border-color: var(--mt-accent); background: var(--mt-accent); color: var(--mt-text-on-accent, #111827); }
 .mt-censor { margin-top: 14px; padding: 12px 16px; border-radius: 12px; background-color: var(--mt-bg-secondary); border: 1px solid var(--mt-border); }
 .mt-censor .mt-checkbox-row { font-weight: 600; }
 .mt-censor-char { margin-top: 8px; }
@@ -4093,7 +4351,7 @@ async function initializeExtension() {
                                         <div>
                                             <span class="mt-label" style="margin-top:2px; font-size:0.76em;">${v.label} <code style="opacity:0.6;">${v.css}</code></span>
                                             <div style="display:flex; gap:6px; align-items:center;">
-                                                <input type="color" id="mt-custom-pick-${v.key}" data-mt-var="${v.key}" class="mt-custom-pick" style="width:34px; height:30px; padding:0; border:none; background:none; cursor:pointer; flex-shrink:0;">
+                                                <button type="button" id="mt-custom-pick-${v.key}" data-mt-var="${v.key}" class="mt-custom-pick mt-cpick-swatch" title="Выбрать цвет"><span class="mt-cpick-swatch-color"></span></button>
                                                 <input type="text" id="mt-custom-var-${v.key}" class="mt-input-field mt-custom-var" placeholder="${v.def || (v.hint + ' (по умолчанию)')}">
                                             </div>
                                         </div>`).join('')}
@@ -5040,6 +5298,7 @@ async function initializeExtension() {
 
         // --- Close settings ---
         $('#mt-close-settings').on('click', () => {
+            mtCloseColorPicker(false);
             $('#mt-settings-modal').hide();
             // Откат несохранённого превью темы
             applyTheme(localStorage.getItem('moodtube_theme') || 'blue');
@@ -5084,15 +5343,13 @@ async function initializeExtension() {
         $(document).on('input', '.mt-custom-label', previewCustomTheme);
         $(document).on('input', '#mt-custom-theme-name, #mt-custom-theme-css, .mt-custom-var', function() {
             if ($(this).hasClass('mt-custom-var')) {
-                const key = this.id.replace('mt-custom-var-', '');
-                const val = String($(this).val()).trim();
-                if (/^#[0-9a-f]{6}$/i.test(val)) $(`#mt-custom-pick-${key}`).val(val);
+                mtUpdateSwatch(this.id.replace('mt-custom-var-', ''));
             }
             previewCustomTheme();
         });
-        $(document).on('input', '.mt-custom-pick', function() {
-            $(`#mt-custom-var-${$(this).data('mt-var')}`).val($(this).val());
-            previewCustomTheme();
+        $(document).on('click', '.mt-custom-pick', function(e) {
+            e.preventDefault();
+            mtOpenColorPicker($(this).attr('data-mt-var'), this);
         });
         // Tab в редакторе CSS вставляет отступ, а не уводит фокус
         $('#mt-custom-theme-css').on('keydown', function(e) {
