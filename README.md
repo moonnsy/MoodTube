@@ -152,7 +152,7 @@
 ├─ .mt-slot.mt-slot-decor              картинка --mt-img-decor (поверх, клики проходят насквозь)
 ├─ .mt-panel.mt-panel-queue / .mt-panel-playlists
 │  └─ .mt-queue-item(.mt-is-current / .mt-is-blocked / .mt-is-searching) > .mt-queue-thumb, .mt-queue-title, .mt-queue-now, .mt-queue-add, .mt-queue-dislike; пусто — .mt-queue-empty
-├─ .mt-window-btn.mt-btn-settings / .mt-btn-close
+├─ .mt-window-btn.mt-btn-lyrics / .mt-btn-search / .mt-btn-settings / .mt-btn-close
 └─ .mt-resize-handle
 ```
 Плавающая кнопка: `.mt-fab` > `.mt-fab-icon`. У неё те же классы состояния, что и у плеера. Пока кнопку тащат, на ней висит `.mt-is-dragging`, а внутри DreamAlbum — `.mt-fab-docked`. Inline у кнопки только координаты.
@@ -194,6 +194,6 @@
 ```
 Переменные: `--mt-dock-height` (48px), `--mt-dock-bg`, `--mt-dock-cover-size` (36px), `--mt-dock-cover-radius` (50%), `--mt-dock-track`, `--mt-dock-progress`, `--mt-dock-panel-height` (min(340px, 50vh)), `--mt-dock-panel-max-width` (520px). Когда включён этот вид, у `body` есть класс `.mt-layout-dock`.
 
-**Текст песни.** Кнопка 🎤 слева от названия трека (`.mt-btn-lyrics`, `.mt-is-open`) открывает панель `.mt-panel-lyrics` (`.mt-is-open` во время анимации появления). Строки — `.mt-lyric-line` (`.mt-is-active` — текущая, `.mt-is-past` — уже спетые), у синхронного текста тело получает класс `.mt-lyrics-synced`. Если текста нет, показывается `.mt-lyrics-message`. Текст берётся с lrclib.net.
+**Текст песни.** Кнопка 🎤 в ряду кнопок окна рядом с лупой (`.mt-window-btn.mt-btn-lyrics`, `.mt-is-open`) открывает панель `.mt-panel-lyrics` (`.mt-is-open` во время анимации появления). Строки — `.mt-lyric-line` (`.mt-is-active` — текущая, `.mt-is-past` — уже спетые), у синхронного текста тело получает класс `.mt-lyrics-synced`. Если текста нет, показывается `.mt-lyrics-message`. Текст берётся с lrclib.net.
 **Слайдеры** защищены от глобальных стилей таверны. Их вид меняется переменными, `!important` не нужен:
 `--mt-slider-track`, `--mt-slider-track-height`, `--mt-slider-track-radius`, `--mt-slider-progress` (Firefox), `--mt-slider-thumb-size`, `--mt-slider-thumb-bg`, `--mt-slider-thumb-bg-hover`, `--mt-slider-thumb-border`, `--mt-slider-thumb-radius`, `--mt-slider-thumb-shadow`.

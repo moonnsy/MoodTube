@@ -3836,7 +3836,7 @@ async function initializeExtension() {
         .mt-slot-cover { z-index: 2; border-radius: inherit; background-image: var(--mt-img-cover, none); }
 
         .mt-player-header {
-            position: absolute; top: 12px; left: 18px; right: 70px; z-index: 2;
+            position: absolute; top: 12px; left: 18px; right: 112px; z-index: 2;
             display: flex; align-items: baseline; gap: 8px; pointer-events: none;
             font-size: 12px; white-space: nowrap; overflow: hidden;
         }
@@ -3883,15 +3883,15 @@ async function initializeExtension() {
         .mt-btn-queue { font-size: 16px; }
         .mt-btn-play { font-size: 28px; width: 28px; text-align: center; }
         .mt-btn-favorite { position: absolute; right: 0; top: 0; color: var(--mt-accent); font-size: 16px; }
-        .mt-btn-lyrics { position: absolute; left: 0; top: 0; color: var(--mt-accent); font-size: 15px; }
         .mt-btn-ai { display: inline-flex; align-items: center; justify-content: center; }
         .mt-btn-ai.mt-is-busy { color: #00ff00; }
         .mt-window-btn { position: absolute; top: 12px; z-index: 5; color: var(--mt-text-dim, #888); font-size: 16px; }
         .mt-btn-settings { right: 40px; }
         .mt-btn-search { right: 65px; }
+        .mt-btn-lyrics { right: 90px; }
         /* Панель поиска непрозрачная (у некоторых тем фон полупрозрачный), шапка не залезает под кнопки окна. */
         .mt-panel-search { background: linear-gradient(var(--mt-bg-primary), var(--mt-bg-primary)), var(--mt-bg-solid, #10151c) !important; backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); }
-        .mt-panel-search .mt-panel-header { padding-right: 88px; min-height: 22px; }
+        .mt-panel-search .mt-panel-header { padding-right: 112px; min-height: 22px; }
         .mt-btn-search.mt-is-open { color: var(--mt-accent) !important; }
         /* Поле и кнопка строго внутри панели. Селекторы по id и !important: свои темы (в т.ч. CSS из темы Таверны)
            и общие стили Таверны для input не могут растянуть поле. Сетка: поле занимает остаток, кнопка — 44px. */
@@ -3917,7 +3917,7 @@ async function initializeExtension() {
         .mt-panel-playlists { z-index: 5; }
         .mt-panel-header { display: flex; justify-content: space-between; align-items: center; gap: 8px; min-height: 22px; margin-bottom: 10px; flex-shrink: 0; }
         /* Справа поверх шапки висят кнопки окна (поиск, настройки) — оставляем под них место, название не переносится */
-        .mt-panel-header-left { display: flex; align-items: center; gap: 10px; flex: 1 1 auto; min-width: 0; margin-right: 60px; }
+        .mt-panel-header-left { display: flex; align-items: center; gap: 10px; flex: 1 1 auto; min-width: 0; margin-right: 85px; }
         .mt-panel-header-left > i { flex-shrink: 0; }
         .mt-panel-title { font-weight: bold; font-size: 14px; color: var(--mt-accent); min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
         .mt-panel-header > .mt-panel-close { flex-shrink: 0; }
@@ -3953,7 +3953,7 @@ async function initializeExtension() {
             color: var(--mt-text-dim, #888); font-size: 13px; text-align: center; padding: 0 12px;
         }
         .mt-lyrics-message i { font-size: 22px; color: var(--mt-accent); opacity: 0.8; }
-        .mt-btn-lyrics.mt-is-open { color: var(--mt-accent-hover, var(--mt-accent)); }
+        .mt-btn-lyrics.mt-is-open { color: var(--mt-accent) !important; }
 
         /* Строки очереди и плейлистов Spotify */
         .mt-queue-item {
@@ -4212,7 +4212,7 @@ async function initializeExtension() {
         .mt-player.moodtube-row-layout .mt-player-body { flex-direction: row; justify-content: flex-start; gap: 12px; }
         .mt-player.moodtube-row-layout .mt-cover { width: 50px; height: 50px; border-width: 2px; }
         .mt-player.moodtube-row-layout .mt-cover-hole { width: 8px; height: 8px; }
-        .mt-player.moodtube-row-layout .mt-track-info { align-items: flex-start; text-align: left; flex: 0 1 180px; width: auto; min-width: 70px; padding: 0 22px; }
+        .mt-player.moodtube-row-layout .mt-track-info { align-items: flex-start; text-align: left; flex: 0 1 180px; width: auto; min-width: 70px; padding: 0 22px 0 0; }
         .mt-player.moodtube-row-layout .mt-progress { flex: 1 1 140px; width: auto; min-width: 90px; margin-top: 0; }
         .mt-player.moodtube-row-layout .mt-controls { gap: 12px; }
         .mt-player.moodtube-row-layout .mt-volume { flex: 0 1 110px; width: auto; min-width: 70px; }
@@ -4259,7 +4259,6 @@ async function initializeExtension() {
                 <div id="moodtube-title-container" class="mt-track-info">
                     <span id="moodtube-widget-title" class="mt-track-title">No Track Selected</span>
                     <span id="moodtube-label-subtitle" class="mt-track-subtitle">MoodTube DJ</span>
-                    <i class="fa-solid fa-microphone-lines moodtube-ctrl mt-btn mt-btn-lyrics" id="moodtube-btn-lyrics" title="Текст песни"></i>
                     <i class="fa-regular fa-heart moodtube-ctrl mt-btn mt-btn-favorite" id="moodtube-btn-favorite" title="В избранное"></i>
                 </div>
 
@@ -4334,6 +4333,7 @@ async function initializeExtension() {
                 <div class="mt-search-hint">Трек включится сразу. Ссылка на плейлист YouTube — весь плейлист встанет в очередь.</div>
             </div>
 
+            <i class="fa-solid fa-microphone-lines moodtube-ctrl mt-btn mt-window-btn mt-btn-lyrics" id="moodtube-btn-lyrics" title="Текст песни"></i>
             <i class="fa-solid fa-magnifying-glass moodtube-ctrl mt-btn mt-window-btn mt-btn-search" id="moodtube-btn-search" title="Найти трек"></i>
             <i class="fa-solid fa-gear moodtube-ctrl mt-btn mt-window-btn mt-btn-settings" id="moodtube-btn-settings" title="Settings"></i>
             <i class="fa-solid fa-xmark moodtube-ctrl mt-btn mt-window-btn mt-btn-close" id="moodtube-btn-close" title="Close"></i>
