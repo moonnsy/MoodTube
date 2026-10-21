@@ -1,7 +1,7 @@
 
 
 import { getContext, extension_settings } from '../../../extensions.js';
-import { generateRaw, eventSource, event_types, saveSettingsDebounced } from '../../../../script.js';
+import { generateRaw, eventSource, event_types, saveSettingsDebounced, setExtensionPrompt, extension_prompt_types, extension_prompt_roles } from '../../../../script.js';
 
 if (!localStorage.getItem('moodtube_spotify_scopes_v3')) {
     localStorage.removeItem('moodtube_spotify_token');
@@ -1229,7 +1229,9 @@ function updatePlayerVisibility() {
     else $widget.css('display', 'flex'); 
 }
 
-function playNextInQueue() {
+async function playNextInQueue() {
+    // Затухание до того, как текущий звук будет оборван (иначе запасной аудиопоток глохнет сразу)
+    await mtFadeOutCurrent();
     if (audioFallback) { audioFallback.pause(); isUsingAudioFallback = false; }
     if (trackQueue.length === 0) {
         if (ytPlayer && typeof ytPlayer.stopVideo === 'function') ytPlayer.stopVideo();
@@ -1263,7 +1265,8 @@ function playNextInQueue() {
     }
 }
 
-function playPrevInQueue() {
+async function playPrevInQueue() {
+    await mtFadeOutCurrent();
     if (audioFallback) { audioFallback.pause(); isUsingAudioFallback = false; }
     if (trackQueue.length === 0 || currentQueueIndex <= 0) {
         if (ytPlayer && typeof ytPlayer.seekTo === 'function') ytPlayer.seekTo(0);
@@ -1503,7 +1506,19 @@ function playAudioStream(track, streamUrl, index) {
     $('#moodtube-btn-favorite').removeClass('fa-solid').addClass('fa-regular');
 }
 
+// Обёртка: плавное затухание старого трека и нарастание нового (если включено в настройках)
 async function playTrack(videoInfo) {
+    mtEndFading = false;
+    if (!isFadeOn() || !videoInfo) return playTrackNow(videoInfo);
+    const ms = getFadeMs();
+    if (mtIsAudible() && mtOutVolume !== 0) await mtFade(mtOutVolume ?? Number(currentVolume), 0, ms);
+    const result = await playTrackNow(videoInfo);
+    mtSetOutputVolume(0);
+    mtFade(0, Number(currentVolume), ms);
+    return result;
+}
+
+async function playTrackNow(videoInfo) {
     if (!videoInfo || (!videoInfo.videoId && !videoInfo.streamUrl)) return;
 
     window.dispatchEvent(new CustomEvent('moodtube:trackchange', {
@@ -2424,6 +2439,265 @@ function applyThemeLabels(theme) {
 }
 
 // Состояние плеера для тем: класс .mt-is-playing и data-mt-state="playing|paused|idle"
+// ============================================================
+//  МУЗЫКА В КОНТЕКСТЕ ЧАТА: название играющего трека уходит в промпт таверны,
+//  чтобы персонажи «слышали» музыку. На паузе / без трека — убирается.
+// ============================================================
+const MT_MUSIC_CTX_KEY = 'moodtube_music_context';
+const MT_MUSIC_CTX_PROMPT = 'moodtube_now_playing';
+let mtLastMusicCtx = null;
+
+function isMusicContextOn() {
+    try { return localStorage.getItem(MT_MUSIC_CTX_KEY) === 'true'; } catch (e) { return false; }
+}
+
+function mtCleanTrackTitle(title) {
+    return String(title || '').replace(/^(Ищем: |❌ Не найдено: |❌ Заблокировано: |Playlist: )/, '').trim();
+}
+
+function updateMusicContext() {
+    let text = '';
+    if (isMusicContextOn()) {
+        const state = $('#moodtube-mini-player').attr('data-mt-state');
+        const t = mtCurrentTrack();
+        // Без хвостов YouTube вроде «(Official Video)» / «[HD]», осмысленные «(Remix)» остаются
+        const title = t && t.videoId ? mtCleanTrackTitle(t.title).replace(/\s*[\(\[][^\)\]]*\b(official|video|lyrics?|audio|hd|hq|4k|mv|visualizer)\b[^\)\]]*[\)\]]/gi, '').trim() : '';
+        if (state === 'playing' && title) {
+            text = `[Music currently playing in the scene: "${title}". Characters can hear it and may react to it if it fits the moment.]`;
+        }
+    }
+    if (text === mtLastMusicCtx) return;
+    mtLastMusicCtx = text;
+    try { setExtensionPrompt(MT_MUSIC_CTX_PROMPT, text, extension_prompt_types.IN_CHAT, 1, false, extension_prompt_roles.SYSTEM); }
+    catch (e) { console.warn(`${LOG_PREFIX} setExtensionPrompt failed`, e); }
+}
+
+// ============================================================
+//  ПЛАВНОЕ ЗАТУХАНИЕ: текущий трек гаснет перед переключением, новый нарастает;
+//  перед естественным концом трека громкость тоже плавно уходит.
+// ============================================================
+const MT_FADE_KEY = 'moodtube_fade';
+const MT_FADE_MS_KEY = 'moodtube_fade_ms';
+const MT_FADE_OPTIONS = { 800: 'Быстро (0.8 с)', 1500: 'Обычно (1.5 с)', 2500: 'Медленно (2.5 с)', 4000: 'Очень медленно (4 с)' };
+let mtFadeToken = 0;
+let mtOutVolume = null; // что сейчас реально выставлено на выходе (null — как на ползунке)
+let mtEndFading = false;
+
+function isFadeOn() {
+    try { return localStorage.getItem(MT_FADE_KEY) === 'true'; } catch (e) { return false; }
+}
+function getFadeMs() {
+    let v = 1500;
+    try { v = Number(localStorage.getItem(MT_FADE_MS_KEY)) || 1500; } catch (e) {}
+    return MT_FADE_OPTIONS[v] ? v : 1500;
+}
+
+function mtSetOutputVolume(v) {
+    v = Math.max(0, Math.min(100, Math.round(v)));
+    mtOutVolume = v;
+    try { if (ytPlayer && typeof ytPlayer.setVolume === 'function') ytPlayer.setVolume(v); } catch (e) {}
+    try { if (audioFallback) audioFallback.volume = v / 100; } catch (e) {}
+    if ((localStorage.getItem('moodtube_playback_source') || 'youtube') === 'spotify' && typeof spotifyPlayer !== 'undefined' && spotifyPlayer) {
+        try { spotifyPlayer.setVolume(v / 100); } catch (e) {}
+    }
+}
+
+function mtFade(from, to, ms) {
+    const token = ++mtFadeToken;
+    return new Promise(resolve => {
+        const start = performance.now();
+        const tick = () => {
+            if (token !== mtFadeToken) { resolve(false); return; }
+            const k = Math.min(1, (performance.now() - start) / ms);
+            mtSetOutputVolume(from + (to - from) * k);
+            if (k < 1) setTimeout(tick, 60); else resolve(true);
+        };
+        tick();
+    });
+}
+
+let mtFadingOut = false;
+async function mtFadeOutCurrent() {
+    if (!isFadeOn() || mtFadingOut || !mtIsAudible()) return;
+    mtFadingOut = true;
+    try { if (mtOutVolume !== 0) await mtFade(mtOutVolume ?? Number(currentVolume), 0, getFadeMs()); } finally { mtFadingOut = false; }
+}
+
+// Слышно ли сейчас что-то (на паузе или после конца трека гасить нечего)
+function mtIsAudible() {
+    if (!isCurrentlyPlaying) return false;
+    try {
+        if (isUsingAudioFallback && audioFallback) return !audioFallback.paused && !audioFallback.ended;
+        if (ytPlayer && typeof ytPlayer.getPlayerState === 'function') return ytPlayer.getPlayerState() === YT.PlayerState.PLAYING;
+    } catch (e) {}
+    return isCurrentlyPlaying;
+}
+
+// ============================================================
+//  ТЕКСТ ПЕСНИ (lrclib.net, синхронный по таймкодам)
+// ============================================================
+const mtLyricsCache = new Map();
+let mtLyrics = null;          // { key, lines: [{t, text}], synced, status }
+let mtLyricsTimer = null;
+let mtLyricsActive = -1;
+let mtSpotifyPos = null;      // { current, total, at, paused } — из таймера прогресса
+
+function mtGetPlaybackTime() {
+    const source = localStorage.getItem('moodtube_playback_source') || 'youtube';
+    if (source === 'spotify' && mtSpotifyPos) {
+        return mtSpotifyPos.current + (mtSpotifyPos.paused ? 0 : (performance.now() - mtSpotifyPos.at) / 1000);
+    }
+    try {
+        if (isUsingAudioFallback && audioFallback) return audioFallback.currentTime || 0;
+        if (ytPlayer && typeof ytPlayer.getCurrentTime === 'function') return ytPlayer.getCurrentTime() || 0;
+    } catch (e) {}
+    return 0;
+}
+
+function mtGetPlaybackDuration() {
+    const source = localStorage.getItem('moodtube_playback_source') || 'youtube';
+    if (source === 'spotify' && mtSpotifyPos) return mtSpotifyPos.total || 0;
+    try {
+        if (isUsingAudioFallback && audioFallback) return audioFallback.duration || 0;
+        if (ytPlayer && typeof ytPlayer.getDuration === 'function') return ytPlayer.getDuration() || 0;
+    } catch (e) {}
+    return 0;
+}
+
+// «Artist - Song (Official Video) [HD]» → «Artist Song»
+function mtLyricsQuery(title) {
+    return mtCleanTrackTitle(title)
+        .replace(/\[[^\]]*\]|\([^)]*\)|【[^】]*】/g, ' ')
+        .replace(/\b(official|music|video|audio|lyrics?|lyric video|hd|hq|4k|mv|visualizer|remaster(ed)?|ft\.?|feat\.?)\b/gi, ' ')
+        .replace(/[|•–—\-_"«»]+/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+}
+
+// «Artist — Track», без повтора артиста, если он уже есть в названии
+function mtLyricsSourceLabel(pick) {
+    const artist = String(pick.artistName || '').trim(), track = String(pick.trackName || '').trim();
+    return artist && !track.toLowerCase().includes(artist.toLowerCase()) ? `${artist} — ${track}` : track;
+}
+
+function mtParseLrc(lrc) {
+    const lines = [];
+    String(lrc || '').split(/\r?\n/).forEach(row => {
+        const stamps = [...row.matchAll(/\[(\d{1,2}):(\d{2})(?:[.:](\d{1,3}))?\]/g)];
+        if (!stamps.length) return;
+        const text = row.replace(/\[[^\]]*\]/g, '').trim();
+        stamps.forEach(m => {
+            const frac = m[3] ? Number(m[3]) / Math.pow(10, m[3].length) : 0;
+            lines.push({ t: Number(m[1]) * 60 + Number(m[2]) + frac, text });
+        });
+    });
+    return lines.sort((a, b) => a.t - b.t);
+}
+
+async function mtFetchLyrics(track) {
+    const key = track.videoId || mtCleanTrackTitle(track.title);
+    if (mtLyricsCache.has(key)) return mtLyricsCache.get(key);
+    const q = mtLyricsQuery(track.title);
+    let result = { key, status: 'notfound', lines: [], synced: false };
+    if (q) {
+        try {
+            const res = await fetchWithTimeout(`https://lrclib.net/api/search?q=${encodeURIComponent(q)}`, { credentials: 'omit' }, 10000);
+            if (res.ok) {
+                const items = (await res.json()) || [];
+                const dur = mtGetPlaybackDuration();
+                const near = (x) => !dur || !x.duration || Math.abs(x.duration - dur) <= 6;
+                const pick = items.find(x => x.syncedLyrics && near(x)) || items.find(x => x.syncedLyrics)
+                    || items.find(x => x.plainLyrics && near(x)) || items.find(x => x.plainLyrics)
+                    || items.find(x => x.instrumental);
+                if (pick && pick.syncedLyrics) result = { key, status: 'ok', synced: true, lines: mtParseLrc(pick.syncedLyrics), source: mtLyricsSourceLabel(pick) };
+                else if (pick && pick.plainLyrics) result = { key, status: 'ok', synced: false, lines: pick.plainLyrics.split(/\r?\n/).map(text => ({ t: null, text: text.trim() })), source: mtLyricsSourceLabel(pick) };
+                else if (pick && pick.instrumental) result = { key, status: 'instrumental', lines: [], synced: false };
+            } else result.status = 'error';
+        } catch (e) { result.status = 'error'; }
+    }
+    if (result.status !== 'error') mtLyricsCache.set(key, result);
+    return result;
+}
+
+function mtRenderLyricsMessage(icon, text) {
+    $('#moodtube-lyrics-body').html(`<div class="mt-lyrics-message"><i class="${icon}"></i><span></span></div>`).find('span').text(text);
+}
+
+async function mtLoadLyricsForCurrent() {
+    const t = mtCurrentTrack();
+    const $body = $('#moodtube-lyrics-body');
+    mtLyricsActive = -1;
+    if (!t || !t.videoId) { mtLyrics = null; mtRenderLyricsMessage('fa-solid fa-music', 'Сейчас ничего не играет'); return; }
+    const key = t.videoId || mtCleanTrackTitle(t.title);
+    $('#moodtube-lyrics-track').text(mtCleanTrackTitle(t.title));
+    mtLyrics = { key, status: 'loading', lines: [] };
+    mtRenderLyricsMessage('fa-solid fa-spinner fa-spin', 'Ищу текст…');
+    const result = await mtFetchLyrics(t);
+    if (!mtLyrics || mtLyrics.key !== key) return; // трек уже сменился
+    mtLyrics = result;
+    if (result.status === 'instrumental') { mtRenderLyricsMessage('fa-solid fa-guitar', 'Инструментал — слов нет'); return; }
+    if (result.status === 'error') { mtRenderLyricsMessage('fa-solid fa-triangle-exclamation', 'Не удалось связаться с lrclib.net'); return; }
+    if (result.status !== 'ok' || !result.lines.length) { mtRenderLyricsMessage('fa-regular fa-face-meh', 'Текст не найден'); return; }
+
+    $body.empty().toggleClass('mt-lyrics-synced', result.synced);
+    const $list = $('<div class="mt-lyrics-lines"></div>').appendTo($body);
+    result.lines.forEach((l, i) => {
+        const $line = $('<div class="mt-lyric-line"></div>').text(l.text || '♪').attr('data-i', i);
+        if (!l.text) $line.addClass('mt-lyric-gap');
+        if (result.synced) $line.attr('title', 'Перемотать сюда');
+        $list.append($line);
+    });
+    if (result.source) $('<div class="mt-lyrics-credit"></div>').text(`${result.source} · lrclib.net`).appendTo($body);
+    mtSyncLyrics(true);
+}
+
+function mtSyncLyrics(force = false) {
+    if (!mtLyrics || mtLyrics.status !== 'ok' || !mtLyrics.synced) return;
+    const now = mtGetPlaybackTime() + 0.25;
+    let idx = -1;
+    for (let i = 0; i < mtLyrics.lines.length; i++) { if (mtLyrics.lines[i].t <= now) idx = i; else break; }
+    if (idx === mtLyricsActive && !force) return;
+    mtLyricsActive = idx;
+    const $lines = $('#moodtube-lyrics-body .mt-lyric-line');
+    $lines.removeClass('mt-is-active mt-is-past');
+    if (idx >= 0) {
+        $lines.slice(0, idx).addClass('mt-is-past');
+        const el = $lines.eq(idx).addClass('mt-is-active')[0];
+        const body = document.getElementById('moodtube-lyrics-body');
+        if (el && body && !body.matches(':hover')) {
+            body.scrollTo({ top: el.offsetTop - body.clientHeight / 2 + el.offsetHeight / 2, behavior: force ? 'auto' : 'smooth' });
+        }
+    }
+}
+
+function openLyricsPanel() {
+    $('#moodtube-inner-content').hide();
+    $('#moodtube-queue-container, #moodtube-spotify-playlists-container, #moodtube-search-container').hide();
+    $('#moodtube-btn-close').hide();
+    const $p = $('#moodtube-lyrics-container');
+    $p.css('display', 'flex').removeClass('mt-is-open');
+    void $p[0].offsetWidth; // перезапуск анимации появления
+    $p.addClass('mt-is-open');
+    $('#moodtube-btn-lyrics').addClass('mt-is-open');
+    mtLoadLyricsForCurrent();
+    clearInterval(mtLyricsTimer);
+    mtLyricsTimer = setInterval(() => {
+        if (!$('#moodtube-lyrics-container').is(':visible')) return;
+        const t = mtCurrentTrack();
+        const key = t ? (t.videoId || mtCleanTrackTitle(t.title)) : null;
+        if (t && t.videoId && (!mtLyrics || mtLyrics.key !== key)) { mtLoadLyricsForCurrent(); return; }
+        mtSyncLyrics();
+    }, 250);
+}
+
+function closeLyricsPanel() {
+    clearInterval(mtLyricsTimer); mtLyricsTimer = null;
+    $('#moodtube-lyrics-container').hide().removeClass('mt-is-open');
+    $('#moodtube-btn-lyrics').removeClass('mt-is-open');
+    $('#moodtube-inner-content').css('display', '');
+    $('#moodtube-btn-close').show();
+}
+
 function syncPlayerState() {
     const $player = $('#moodtube-mini-player');
     if (!$player.length) return;
@@ -2437,6 +2711,7 @@ function syncPlayerState() {
         .toggleClass('mt-is-idle', state === 'idle');
     $('#moodtube-label-status').text(mtStatusLabels[state] || '');
     try { updateFavoriteButton(); } catch (e) {}
+    try { updateMusicContext(); } catch (e) {}
     if (state !== lastBroadcastState) {
         lastBroadcastState = state;
         window.dispatchEvent(new CustomEvent('moodtube:state', { detail: { state } }));
@@ -3608,6 +3883,7 @@ async function initializeExtension() {
         .mt-btn-queue { font-size: 16px; }
         .mt-btn-play { font-size: 28px; width: 28px; text-align: center; }
         .mt-btn-favorite { position: absolute; right: 0; top: 0; color: var(--mt-accent); font-size: 16px; }
+        .mt-btn-lyrics { position: absolute; left: 0; top: 0; color: var(--mt-accent); font-size: 15px; }
         .mt-btn-ai { display: inline-flex; align-items: center; justify-content: center; }
         .mt-btn-ai.mt-is-busy { color: #00ff00; }
         .mt-window-btn { position: absolute; top: 12px; z-index: 5; color: var(--mt-text-dim, #888); font-size: 16px; }
@@ -3647,6 +3923,37 @@ async function initializeExtension() {
         .mt-panel-header > .mt-panel-close { flex-shrink: 0; }
         .mt-panel-close { font-size: 14px; }
         .mt-panel-list { flex: 1; overflow-y: auto; padding-right: 5px; }
+
+        /* Текст песни */
+        .mt-panel-lyrics { z-index: 4; }
+        .mt-panel-lyrics.mt-is-open { animation: mt-lyrics-in 0.38s cubic-bezier(0.2, 0.8, 0.2, 1); }
+        @keyframes mt-lyrics-in { from { opacity: 0; transform: translateY(14px) scale(0.98); } to { opacity: 1; transform: none; } }
+        .mt-panel-lyrics .mt-panel-title { display: flex; align-items: center; gap: 6px; }
+        #moodtube-lyrics-track { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .mt-lyrics-body {
+            flex: 1; min-height: 0; overflow-y: auto; scrollbar-width: none; position: relative;
+            -webkit-mask-image: linear-gradient(transparent, #000 14%, #000 86%, transparent);
+            mask-image: linear-gradient(transparent, #000 14%, #000 86%, transparent);
+        }
+        .mt-lyrics-body::-webkit-scrollbar { display: none; }
+        .mt-lyrics-lines { padding: 38% 6px; }
+        .mt-lyrics-body:not(.mt-lyrics-synced) .mt-lyrics-lines { padding: 12% 6px; }
+        .mt-lyric-line {
+            padding: 5px 4px; text-align: center; font-size: 14px; line-height: 1.35; color: var(--mt-text, #fff);
+            opacity: 0.42; transform-origin: center; transition: opacity 0.35s, transform 0.35s, color 0.35s;
+        }
+        .mt-lyrics-body:not(.mt-lyrics-synced) .mt-lyric-line { opacity: 0.85; }
+        .mt-lyrics-synced .mt-lyric-line { cursor: pointer; }
+        .mt-lyric-line.mt-is-past { opacity: 0.28; }
+        .mt-lyric-line.mt-is-active { opacity: 1; color: var(--mt-accent); font-weight: 700; transform: scale(1.07); }
+        .mt-lyric-gap { min-height: 1.35em; }
+        .mt-lyrics-credit { padding: 0 6px 14px; text-align: center; font-size: 10px; color: var(--mt-text-dim, #888); opacity: 0.7; }
+        .mt-lyrics-message {
+            height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px;
+            color: var(--mt-text-dim, #888); font-size: 13px; text-align: center; padding: 0 12px;
+        }
+        .mt-lyrics-message i { font-size: 22px; color: var(--mt-accent); opacity: 0.8; }
+        .mt-btn-lyrics.mt-is-open { color: var(--mt-accent-hover, var(--mt-accent)); }
 
         /* Строки очереди и плейлистов Spotify */
         .mt-queue-item {
@@ -3905,7 +4212,7 @@ async function initializeExtension() {
         .mt-player.moodtube-row-layout .mt-player-body { flex-direction: row; justify-content: flex-start; gap: 12px; }
         .mt-player.moodtube-row-layout .mt-cover { width: 50px; height: 50px; border-width: 2px; }
         .mt-player.moodtube-row-layout .mt-cover-hole { width: 8px; height: 8px; }
-        .mt-player.moodtube-row-layout .mt-track-info { align-items: flex-start; text-align: left; flex: 0 1 180px; width: auto; min-width: 70px; padding: 0 22px 0 0; }
+        .mt-player.moodtube-row-layout .mt-track-info { align-items: flex-start; text-align: left; flex: 0 1 180px; width: auto; min-width: 70px; padding: 0 22px; }
         .mt-player.moodtube-row-layout .mt-progress { flex: 1 1 140px; width: auto; min-width: 90px; margin-top: 0; }
         .mt-player.moodtube-row-layout .mt-controls { gap: 12px; }
         .mt-player.moodtube-row-layout .mt-volume { flex: 0 1 110px; width: auto; min-width: 70px; }
@@ -3952,6 +4259,7 @@ async function initializeExtension() {
                 <div id="moodtube-title-container" class="mt-track-info">
                     <span id="moodtube-widget-title" class="mt-track-title">No Track Selected</span>
                     <span id="moodtube-label-subtitle" class="mt-track-subtitle">MoodTube DJ</span>
+                    <i class="fa-solid fa-microphone-lines moodtube-ctrl mt-btn mt-btn-lyrics" id="moodtube-btn-lyrics" title="Текст песни"></i>
                     <i class="fa-regular fa-heart moodtube-ctrl mt-btn mt-btn-favorite" id="moodtube-btn-favorite" title="В избранное"></i>
                 </div>
 
@@ -3990,6 +4298,16 @@ async function initializeExtension() {
                 <div id="moodtube-queue-list" class="mt-panel-list">
                     <div class="mt-queue-empty">Очередь пуста</div>
                 </div>
+            </div>
+
+            <div id="moodtube-lyrics-container" class="mt-panel mt-panel-lyrics" style="display:none;">
+                <div class="mt-panel-header">
+                    <div class="mt-panel-header-left">
+                        <span class="mt-panel-title"><i class="fa-solid fa-microphone-lines"></i> <span id="moodtube-lyrics-track">Текст песни</span></span>
+                    </div>
+                    <i class="fa-solid fa-chevron-down moodtube-ctrl mt-btn mt-panel-close" id="moodtube-btn-close-lyrics" title="Скрыть"></i>
+                </div>
+                <div id="moodtube-lyrics-body" class="mt-lyrics-body"></div>
             </div>
 
             <div id="moodtube-spotify-playlists-container" class="mt-panel mt-panel-playlists" style="display:none;">
@@ -4236,6 +4554,7 @@ async function initializeExtension() {
 .mt-censor { margin-top: 14px; padding: 12px 16px; border-radius: 12px; background-color: var(--mt-bg-secondary); border: 1px solid var(--mt-border); }
 .mt-censor .mt-checkbox-row { font-weight: 600; }
 .mt-censor-char { margin-top: 8px; }
+.mt-censor .mt-extra-row { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--mt-divider, rgba(255,255,255,0.05)); }
 .mt-catalog-row { display: flex; gap: 6px; align-items: center; }
 .mt-catalog-row .mt-input-field { flex: 1; min-width: 0; }
 .mt-catalog-row .mt-btn-test { width: auto; margin-top: 0; padding: 8px 12px; white-space: nowrap; flex-shrink: 0; }
@@ -4617,6 +4936,17 @@ async function initializeExtension() {
                             <select id="moodtube-setting-censor-char" class="mt-input-field mt-censor-char">
                                 ${Object.entries(MT_CENSOR_CHARS).map(([code, label]) => `<option value="${code}">${label}</option>`).join('')}
                             </select>
+                            <label class="mt-checkbox-row mt-extra-row">
+                                <input type="checkbox" id="moodtube-setting-music-context">
+                                <span>Музыка в контексте</span>
+                            </label>
+                            <label class="mt-checkbox-row mt-extra-row">
+                                <input type="checkbox" id="moodtube-setting-fade">
+                                <span>Плавное затухание при переключении</span>
+                            </label>
+                            <select id="moodtube-setting-fade-ms" class="mt-input-field mt-censor-char">
+                                ${Object.entries(MT_FADE_OPTIONS).map(([ms, label]) => `<option value="${ms}">${label}</option>`).join('')}
+                            </select>
                         </div>
 
                     </div>
@@ -4943,6 +5273,7 @@ async function initializeExtension() {
                     if (state) {
                         const current = state.position / 1000;
                         const total = state.duration / 1000;
+                        mtSpotifyPos = { current, total, at: performance.now(), paused: !!state.paused };
                         if (total > 0) {
                             $('#moodtube-time-current').text(formatTime(current));
                             $('#moodtube-time-total').text(formatTime(total));
@@ -4978,6 +5309,12 @@ async function initializeExtension() {
                 if (!$('#moodtube-progress-slider').is(':active')) {
                     $('#moodtube-progress-slider').val((current / total) * 100);
                 }
+                // Плавный уход в конце трека
+                const left = total - current;
+                if (isFadeOn() && !mtEndFading && total > 20 && left > 0.3 && left <= getFadeMs() / 1000 + 0.5) {
+                    mtEndFading = true;
+                    mtFade(mtOutVolume ?? Number(currentVolume), 0, left * 1000);
+                }
             }
         }, 1000);
 
@@ -5003,6 +5340,7 @@ async function initializeExtension() {
         });
         
         $('#moodtube-btn-queue').on('click', () => {
+            if ($('#moodtube-lyrics-container').is(':visible')) closeLyricsPanel();
             $('#moodtube-inner-content').hide();
             $('#moodtube-btn-close').hide();
             $('#moodtube-queue-container').css('display', 'flex');
@@ -5254,6 +5592,9 @@ async function initializeExtension() {
             $('#moodtube-setting-custom').val(getMtSetting('custom'));
             $('#moodtube-setting-censor').prop('checked', isCensorOn());
             $('#moodtube-setting-censor-char').val(getCensorCode()).toggle(isCensorOn());
+            $('#moodtube-setting-music-context').prop('checked', isMusicContextOn());
+            $('#moodtube-setting-fade').prop('checked', isFadeOn());
+            $('#moodtube-setting-fade-ms').val(String(getFadeMs())).toggle(isFadeOn());
 
             // Restore active tags from localStorage
             const savedGenres = getMtSetting('genre').split(',').map(s => s.trim()).filter(Boolean);
@@ -5367,6 +5708,7 @@ async function initializeExtension() {
         $('#mt-custom-theme-export').on('click', exportCustomTheme);
         $('#mt-catalog-load').on('click', () => loadThemeCatalog($('#mt-catalog-url').val()));
         $('#moodtube-setting-censor').on('change', function() { $('#moodtube-setting-censor-char').toggle(this.checked); });
+        $('#moodtube-setting-fade').on('change', function() { $('#moodtube-setting-fade-ms').toggle(this.checked); });
         $('#mt-catalog-url').on('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); loadThemeCatalog($('#mt-catalog-url').val()); } });
         $('#mt-custom-theme-reset').on('click', () => {
             if (!confirm('Сбросить кастомную тему к значениям по умолчанию?')) return;
@@ -5426,6 +5768,10 @@ async function initializeExtension() {
             saveMtSetting('custom', $('#moodtube-setting-custom').val().trim());
             localStorage.setItem(MT_CENSOR_KEY, $('#moodtube-setting-censor').is(':checked') ? 'true' : 'false');
             localStorage.setItem(MT_CENSOR_CHAR_KEY, $('#moodtube-setting-censor-char').val() || '2005');
+            localStorage.setItem(MT_MUSIC_CTX_KEY, $('#moodtube-setting-music-context').is(':checked') ? 'true' : 'false');
+            localStorage.setItem(MT_FADE_KEY, $('#moodtube-setting-fade').is(':checked') ? 'true' : 'false');
+            localStorage.setItem(MT_FADE_MS_KEY, $('#moodtube-setting-fade-ms').val() || '1500');
+            updateMusicContext();
 
             toastr.success("Настройки MoodTube сохранены");
             $('#mt-settings-modal').hide();
@@ -5458,8 +5804,23 @@ async function initializeExtension() {
         }
         
         $('#moodtube-btn-ai').on('click', async () => { await triggerMoodAnalysisAndPlay(); });
+        $('#moodtube-btn-lyrics').on('click', () => {
+            if ($('#moodtube-lyrics-container').is(':visible')) closeLyricsPanel(); else openLyricsPanel();
+        });
+        $('#moodtube-btn-close-lyrics').on('click', () => closeLyricsPanel());
+        // Тап по строчке синхронного текста — перемотка к ней
+        $(document).on('click', '#moodtube-lyrics-body.mt-lyrics-synced .mt-lyric-line', function() {
+            const line = mtLyrics && mtLyrics.lines[Number($(this).attr('data-i'))];
+            const total = mtGetPlaybackDuration();
+            if (!line || line.t == null || !total) return;
+            $('#moodtube-progress-slider').val(Math.max(0, Math.min(100, (line.t / total) * 100))).trigger('input').trigger('change');
+            mtLyricsActive = -1;
+            setTimeout(() => mtSyncLyrics(true), 300);
+        });
 
         $('#moodtube-vol-slider').on('input', function() {
+            mtFadeToken++;
+            mtOutVolume = null;
             currentVolume = $(this).val();
             if (ytPlayer && typeof ytPlayer.setVolume === 'function') {
                 ytPlayer.setVolume(currentVolume);

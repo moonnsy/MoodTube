@@ -193,5 +193,7 @@
 └─ .mt-dock-panel > .mt-player.mt-player-docked    (обычный плеер со всеми классами выше)
 ```
 Переменные: `--mt-dock-height` (48px), `--mt-dock-bg`, `--mt-dock-cover-size` (36px), `--mt-dock-cover-radius` (50%), `--mt-dock-track`, `--mt-dock-progress`, `--mt-dock-panel-height` (min(340px, 50vh)), `--mt-dock-panel-max-width` (520px). Когда включён этот вид, у `body` есть класс `.mt-layout-dock`.
+
+**Текст песни.** Кнопка 🎤 слева от названия трека (`.mt-btn-lyrics`, `.mt-is-open`) открывает панель `.mt-panel-lyrics` (`.mt-is-open` во время анимации появления). Строки — `.mt-lyric-line` (`.mt-is-active` — текущая, `.mt-is-past` — уже спетые), у синхронного текста тело получает класс `.mt-lyrics-synced`. Если текста нет, показывается `.mt-lyrics-message`. Текст берётся с lrclib.net.
 **Слайдеры** защищены от глобальных стилей таверны. Их вид меняется переменными, `!important` не нужен:
 `--mt-slider-track`, `--mt-slider-track-height`, `--mt-slider-track-radius`, `--mt-slider-progress` (Firefox), `--mt-slider-thumb-size`, `--mt-slider-thumb-bg`, `--mt-slider-thumb-bg-hover`, `--mt-slider-thumb-border`, `--mt-slider-thumb-radius`, `--mt-slider-thumb-shadow`.
